@@ -546,7 +546,8 @@ impl ConnectionConfig {
             c.path = rest.to_string();
             return Ok(c);
         }
-        let parsed = url::Url::parse(input)?;
+        let escaped = escape_userinfo(input);
+        let parsed = url::Url::parse(&escaped)?;
         let raw_scheme = parsed.scheme().to_lowercase();
         let (scheme, via_ssh) = match raw_scheme.strip_suffix("+ssh") {
             Some(s) => (s.to_string(), true),
@@ -589,6 +590,24 @@ impl ConnectionConfig {
         }
         Ok(c)
     }
+}
+
+/// Percent-encodes characters in the user:password part that would otherwise end the authority
+/// early (`#`, `/`, `?`, `@`, ...), so a password like `abc#1` pasted raw still parses. Existing
+/// `%XX` escapes are left alone.
+fn escape_userinfo(input: &str) -> String {
+    let Some((scheme, rest)) = input.split_once("://") else { return input.to_string() };
+    let head_end = rest.find('?').unwrap_or(rest.len());
+    let Some(at) = rest[..head_end].rfind('@') else { return input.to_string() };
+    let (userinfo, tail) = (&rest[..at], &rest[at..]);
+    const SET: &percent_encoding::AsciiSet =
+        &percent_encoding::CONTROLS.add(b' ').add(b'#').add(b'/').add(b'?').add(b'@').add(b'[').add(b']').add(b'\\');
+    let enc = |s: &str| percent_encoding::utf8_percent_encode(s, SET).to_string();
+    let userinfo = match userinfo.split_once(':') {
+        Some((u, p)) => format!("{}:{}", enc(u), enc(p)),
+        None => enc(userinfo),
+    };
+    format!("{scheme}://{userinfo}{tail}")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -833,6 +852,16 @@ mod tests {
         assert_eq!(c.ssl, SslMode::Require);
         assert_eq!(c.name, "Shop");
         assert_eq!(c.tag, Tag::Production);
+    }
+
+    #[test]
+    fn raw_special_chars_in_password_parse() {
+        let c = ConnectionConfig::from_url("postgresql://Adm:pa#ss/w@rd@db.example.com:5432/postgres").unwrap();
+        assert_eq!(c.user, "Adm");
+        assert_eq!(c.password, "pa#ss/w@rd");
+        assert_eq!(c.host, "db.example.com");
+        assert_eq!(c.port, 5432);
+        assert_eq!(c.database, "postgres");
     }
 
     #[test]
