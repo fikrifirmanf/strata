@@ -15,7 +15,9 @@ impl NativeMenu {
         application.append(&PredefinedMenuItem::separator())?;
         append_action(&application, &mut items, "settings", "Settings…")?;
         application.append(&PredefinedMenuItem::separator())?;
-        application.append(&PredefinedMenuItem::quit(None))?;
+        let quit = MenuItem::with_id("quit", "Quit Strata", true, Some(muda::accelerator::Accelerator::new(muda::accelerator::Modifiers::SUPER, muda::accelerator::Code::KeyQ)));
+        items.push((quit.id().clone(), "quit".to_owned()));
+        application.append(&quit)?;
         menu.append(&application)?;
 
         let file = Submenu::new("File", true);

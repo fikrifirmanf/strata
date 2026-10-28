@@ -143,6 +143,8 @@ The driver picker filters OLTP databases, OLAP/warehouses and operational stores
 **SQL editor**
 - Syntax highlighting, line numbers, current-statement tint
 - Autocomplete for keywords, functions, tables and columns, with alias resolution (`u.` after `FROM users u`)
+- Suggestions appear while typing; use arrows and Tab/Enter, or click a suggestion. Ctrl+Space opens suggestions on demand.
+- Native PostgreSQL, MySQL/MariaDB, file-backed SQLite and SQL Server query tabs start transactions automatically. Changes stay pending until **Commit** or **Rollback**; **Auto-commit** restores immediate execution. Each manual query tab has its own connection, separate from grid edits and other tabs. Closing, reconnecting or changing database/schema asks how to resolve pending work. DDL and transaction/session-control scripts require Auto-commit mode; MySQL rollback requires transactional tables. Other drivers and in-memory SQLite retain immediate execution.
 - Run current statement or selection (⌘↩), run all (⌘⇧↩), stop (⌘.), explain, format (⌘⇧F), toggle comment (⌘/)
 - Auto-closing brackets and quotes, optional keyword upper-casing
 - `:name` query parameters with a prompt
@@ -150,7 +152,7 @@ The driver picker filters OLTP databases, OLAP/warehouses and operational stores
 - Saved queries (per connection or global) and searchable query history with retention
 
 **Database tools**
-- Switch database (⌘K) and schema; create database or schema
+- Search and scroll databases/schemas from the header dropdowns, or switch database with ⌘K; create database or schema
 - Create, rename, clone, truncate and drop tables
 - Import CSV / JSON (into an existing table or a new one) and SQL dumps
 - Export a table or a result to CSV / JSON / SQL / Markdown / Excel; export many tables at once

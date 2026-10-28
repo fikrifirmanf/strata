@@ -9,6 +9,7 @@ pub mod geo;
 pub mod grid;
 pub mod home;
 pub mod json_tree;
+pub mod location_picker;
 pub mod metrics;
 pub mod object_editor;
 pub mod query_tab;

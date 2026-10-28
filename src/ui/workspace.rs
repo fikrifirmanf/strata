@@ -21,6 +21,13 @@ use std::time::Instant;
 pub enum WorkspaceCommand {
     Close(uuid::Uuid),
     Reconnect(uuid::Uuid),
+    Quit,
+}
+
+#[derive(Clone, PartialEq)]
+enum TransactionAction {
+    CloseTab(u64), CloseOthers(u64), CloseWorkspace, Quit, Reconnect,
+    Database(String), Schema(String), AutoCommit(u64, bool), Abandon(u64),
 }
 
 pub struct WorkspaceChoice {
@@ -76,6 +83,8 @@ pub enum WsAction {
     OpenTableFiltered { table: TableRef, column: String, value: Option<String> },
     OpenQuery { sql: String, title: Option<String>, run: bool },
     RunQuery { tab_id: u64, sql: String },
+    SetAutoCommit { tab: u64, enabled: bool },
+    ResolveUncertain(u64),
     RunScript { stmts: Vec<String>, label: String, refresh: bool },
     Gate(Gated),
     RequestCommit(u64),
@@ -156,7 +165,7 @@ impl Tab {
     fn dirty(&self) -> bool {
         match &self.kind {
             TabKind::Table(t) => t.has_changes(),
-            TabKind::Query(q) => q.dirty && q.saved_id.is_some(),
+            TabKind::Query(q) => q.has_pending_transaction() || (q.dirty && q.saved_id.is_some()),
             _ => false,
         }
     }
@@ -190,6 +199,7 @@ pub struct Workspace {
     connecting: Option<Task<anyhow::Result<Session>>>,
     pub connect_error: Option<String>,
     init_task: Option<Task<anyhow::Result<InitData>>>,
+    context_ready: bool,
     objects_task: Option<Task<anyhow::Result<Vec<DbObject>>>>,
     definition_task: Option<Task<anyhow::Result<(DbObject, String)>>>,
     columns_task: Option<Task<anyhow::Result<Vec<(String, String)>>>>,
@@ -206,6 +216,10 @@ pub struct Workspace {
     pub schema: String,
     pub objects: Vec<DbObject>,
     pub catalog: Catalog,
+    database_picker: super::location_picker::LocationPicker,
+    schema_picker: super::location_picker::LocationPicker,
+    transaction_action: Option<TransactionAction>,
+    resolving_transactions: bool,
     sidebar_search: String,
     sidebar_mode: SidebarMode,
     collapsed: HashSet<ObjectKind>,
@@ -247,6 +261,7 @@ impl Workspace {
             connecting: None,
             connect_error: None,
             init_task: None,
+            context_ready: false,
             objects_task: None,
             definition_task: None,
             columns_task: None,
@@ -262,6 +277,10 @@ impl Workspace {
             schema: String::new(),
             objects: vec![],
             catalog: Catalog::default(),
+            database_picker: Default::default(),
+            schema_picker: Default::default(),
+            transaction_action: None,
+            resolving_transactions: false,
             sidebar_search: String::new(),
             sidebar_mode: SidebarMode::Items,
             collapsed: HashSet::new(),
@@ -304,10 +323,13 @@ impl Workspace {
         let cfg = self.cfg.clone();
         self.status = ConnState::Connecting;
         self.connect_error = None;
+        self.context_ready = false;
         self.connecting = Some(Task::spawn(ctx, async move { Session::open(cfg).await }));
     }
 
     pub fn reconnect(&mut self, ctx: &egui::Context) {
+        if self.defer_transaction_action(TransactionAction::Reconnect) { return; }
+        self.reset_query_connections();
         if let Some(s) = self.session.take() {
             let d = s.driver.clone();
             crate::runtime::rt().spawn(async move { d.lock().await.close().await });
@@ -322,6 +344,7 @@ impl Workspace {
 
     fn load_init(&mut self, ctx: &egui::Context, switch_to: Option<String>) {
         let Some(s) = &self.session else { return };
+        self.context_ready = false;
         let wanted_schema = self.schema.clone();
         self.init_task = Some(s.spawn(ctx, move |d| async move {
             let mut d = d.lock().await;
@@ -382,10 +405,12 @@ impl Workspace {
         if let Some(r) = take(&mut self.init_task) {
             match r {
                 Ok(d) => {
+                    self.reset_query_connections();
                     self.databases = d.databases;
                     self.current_db = d.current_db;
                     self.schemas = d.schemas;
                     self.schema = d.schema;
+                    self.context_ready = true;
                     self.set_objects(d.objects, ctx);
                     if let Some(sql) = self.run_after_connect.take() {
                         self.handle(WsAction::OpenQuery { sql, title: None, run: true }, sh, ctx);
@@ -554,6 +579,9 @@ impl Workspace {
     }
 
     pub fn close_tab(&mut self, i: usize) {
+        if let Some(tab) = self.tabs.get(i) {
+            if self.defer_transaction_action(TransactionAction::CloseTab(tab.id)) { return; }
+        }
         if i < self.tabs.len() {
             self.tabs.remove(i);
             if self.active >= self.tabs.len() {
@@ -564,11 +592,120 @@ impl Workspace {
         }
     }
 
+    fn relevant_query(action: &TransactionAction, id: u64) -> bool {
+        match action { TransactionAction::CloseTab(tab) | TransactionAction::AutoCommit(tab, _) | TransactionAction::Abandon(tab) => id == *tab, TransactionAction::CloseOthers(keep) => id != *keep, _ => true }
+    }
+
+    pub fn has_pending_transactions(&self) -> bool {
+        self.tabs.iter().any(|tab| matches!(&tab.kind, TabKind::Query(q) if q.has_pending_transaction() || q.transaction_busy()))
+    }
+
+    pub fn request_close(&mut self, quit: bool) {
+        if self.transaction_action.is_none() {
+            self.transaction_action = Some(if quit { TransactionAction::Quit } else { TransactionAction::CloseWorkspace });
+            self.resolving_transactions = false;
+        }
+    }
+
+    fn cancel_active_query(&self) {
+        if let Some(session) = &self.session {
+            if let Some(Tab { kind: TabKind::Query(q), .. }) = self.tabs.get(self.active) { q.cancel(session); }
+            else { session.cancel(); }
+        }
+    }
+
+    fn defer_transaction_action(&mut self, action: TransactionAction) -> bool {
+        if self.tabs.iter().any(|tab| Self::relevant_query(&action, tab.id) && matches!(&tab.kind, TabKind::Query(q) if q.has_pending_transaction() || q.transaction_busy())) {
+            // Keep the first requested action while a resolution is in progress.
+            if self.transaction_action.is_none() { self.transaction_action = Some(action); }
+            true
+        } else { false }
+    }
+
+    fn reset_query_connections(&mut self) {
+        for tab in &mut self.tabs { if let TabKind::Query(q) = &mut tab.kind { q.reset_connection(); } }
+    }
+
+    pub fn poll_transactions(&mut self) {
+        for tab in &mut self.tabs { if let TabKind::Query(q) = &mut tab.kind { q.poll_transaction(); } }
+    }
+
+    fn apply_transaction_action(&mut self, action: TransactionAction, ctx: &egui::Context, sh: &mut Shared) {
+        match action {
+            TransactionAction::CloseTab(id) => if let Some(i) = self.tab_index(id) { self.close_tab(i); },
+            TransactionAction::CloseOthers(keep) => { self.tabs.retain(|tab| tab.id == keep); self.active = 0; }
+            TransactionAction::CloseWorkspace => *sh.workspace_command = Some(WorkspaceCommand::Close(self.id())),
+            TransactionAction::Quit => *sh.workspace_command = Some(WorkspaceCommand::Quit),
+            TransactionAction::Reconnect => self.reconnect(ctx),
+            TransactionAction::Database(db) => self.handle(WsAction::SwitchDatabase(db), sh, ctx),
+            TransactionAction::Schema(schema) => self.handle(WsAction::SwitchSchema(schema), sh, ctx),
+            TransactionAction::AutoCommit(id, enabled) => if let Some(i) = self.tab_index(id) { if let TabKind::Query(q) = &mut self.tabs[i].kind { q.auto_commit = enabled; q.reset_connection(); } },
+            TransactionAction::Abandon(_) => {}
+        }
+    }
+
+    fn transaction_dialog(&mut self, ctx: &egui::Context, sh: &mut Shared) {
+        let Some(action) = self.transaction_action.clone() else { return };
+        let relevant: Vec<usize> = self.tabs.iter().enumerate().filter(|(_, tab)| Self::relevant_query(&action, tab.id)).filter_map(|(i, tab)| matches!(tab.kind, TabKind::Query(_)).then_some(i)).collect();
+        let busy = relevant.iter().any(|&i| matches!(&self.tabs[i].kind, TabKind::Query(q) if q.transaction_busy()));
+        let pending = relevant.iter().any(|&i| matches!(&self.tabs[i].kind, TabKind::Query(q) if q.has_pending_transaction()));
+        let failed = relevant.iter().any(|&i| matches!(&self.tabs[i].kind, TabKind::Query(q) if q.transaction_error.is_some()));
+        if !busy && !pending && (!self.resolving_transactions || !failed) {
+            self.transaction_action = None; self.resolving_transactions = false;
+            self.apply_transaction_action(action, ctx, sh); return;
+        }
+        if self.resolving_transactions && !busy { self.resolving_transactions = false; }
+        let mut choice = None;
+        let abandon = matches!(action, TransactionAction::Abandon(_));
+        let can_commit = relevant.iter().all(|&i| match &self.tabs[i].kind { TabKind::Query(q) => !q.has_pending_transaction() || q.transaction_state() == crate::query_transaction::TransactionState::Active, _ => true });
+        let response = egui::Modal::new(egui::Id::unique(("pending-query-transaction", self.id()))).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.heading(if abandon { "Close uncertain connection?" } else { "Resolve pending transactions" });
+            ui.label(if abandon { "The server outcome is unknown. Closing this connection cannot confirm whether earlier changes committed. Check the database before retrying." } else { "Choose Commit or Rollback before continuing. Cancel keeps your query tabs and pending work open." });
+            for &i in &relevant {
+                if let TabKind::Query(q) = &self.tabs[i].kind {
+                    if q.has_pending_transaction() || q.transaction_busy() { ui.label(format!("• {}", q.title)); }
+                    if let Some(error) = &q.transaction_error { ui.colored_label(p().danger, error); }
+                }
+            }
+            if busy { ui.horizontal(|ui| { ui.spinner(); ui.label("Waiting for the running operation…"); }); }
+            ui.horizontal(|ui| {
+                if abandon {
+                    if ui.add_enabled(!busy, egui::Button::new("Close connection")).clicked() { choice = Some(2); }
+                } else {
+                    if ui.add_enabled(!busy && can_commit && pending, egui::Button::new("Commit")).clicked() { choice = Some(1); }
+                    if ui.add_enabled(!busy && pending, egui::Button::new("Rollback")).clicked() { choice = Some(0); }
+                    let uncertain = relevant.iter().any(|&i| matches!(&self.tabs[i].kind, TabKind::Query(q) if q.transaction_state() == crate::query_transaction::TransactionState::Unknown));
+                    if uncertain && ui.add_enabled(!busy, egui::Button::new("Close uncertain connections")).clicked() { choice = Some(2); }
+                }
+                if ui.add_enabled(!self.resolving_transactions, egui::Button::new("Cancel")).clicked() { choice = Some(3); }
+            });
+        });
+        if response.should_close() && !self.resolving_transactions { choice = Some(3); }
+        if let Some(choice) = choice {
+            if choice == 3 { self.transaction_action = None; return; }
+            self.resolving_transactions = true;
+            for i in relevant {
+                if let TabKind::Query(q) = &mut self.tabs[i].kind {
+                    if q.has_pending_transaction() {
+                        if choice == 2 && q.transaction_state() == crate::query_transaction::TransactionState::Unknown { q.abandon_transaction(ctx); }
+                        else if choice != 2 { q.finish_transaction(ctx, choice == 1); }
+                    }
+                }
+            }
+        }
+        if busy { ctx.request_repaint_after(std::time::Duration::from_millis(100)); }
+    }
+
     // ---------- safe mode ----------
 
     fn gate(&mut self, g: Gated, sh: &mut Shared) {
         let (reads_only, preview) = match &g {
-            Gated::Query { sql, .. } => (is_read_only(sql), sql.clone()),
+            Gated::Query { tab, sql } => {
+                let managed = crate::query_transaction::supported(&self.cfg) && self.tab_index(*tab).is_some_and(|i| matches!(&self.tabs[i].kind, TabKind::Query(q) if !q.auto_commit));
+                let reads_only = if managed { crate::query_transaction::is_managed_read_only(sql, self.cfg.driver.dialect()) } else { is_read_only(sql) };
+                (reads_only, sql.clone())
+            }
             Gated::Changes(id) => {
                 let stmts = self.commit_preview(*id);
                 (false, stmts.join(";\n"))
@@ -663,10 +800,14 @@ impl Workspace {
         let mut actions = Vec::new();
         match g {
             Gated::Query { tab, sql } => {
+                if self.transaction_action.is_some() || !self.context_ready { return; }
+                let mut cfg = self.cfg.clone();
+                cfg.database = self.current_db.clone();
+                let schema = self.schema.clone();
                 if let Some(i) = self.tab_index(tab) {
                     if let TabKind::Query(q) = &mut self.tabs[i].kind {
                         let cx = TabCtx { ctx: &ctx, session: &session, settings: sh.settings, store: sh.store, actions: &mut actions };
-                        q.start(sql, &cx);
+                        q.start(sql, &cx, cfg, schema);
                     }
                 }
             }
@@ -724,6 +865,11 @@ impl Workspace {
 
     fn handle(&mut self, a: WsAction, sh: &mut Shared, ctx: &egui::Context) {
         match a {
+            WsAction::SetAutoCommit { tab, enabled } => {
+                let action = TransactionAction::AutoCommit(tab, enabled);
+                if !self.defer_transaction_action(action.clone()) { self.apply_transaction_action(action, ctx, sh); }
+            }
+            WsAction::ResolveUncertain(tab) => { self.transaction_action = Some(TransactionAction::Abandon(tab)); }
             WsAction::Toast(k, t) => sh.toasts.push(k, t),
             WsAction::OpenDefinitionSql(object) => {
                 if let Some(session) = &self.session {
@@ -760,6 +906,7 @@ impl Workspace {
                 }
             }
             WsAction::RunQuery { tab_id, sql } => {
+                if !self.context_ready { sh.toasts.info("Wait for the database connection to finish loading"); return; }
                 if sql.trim().is_empty() {
                     return;
                 }
@@ -816,12 +963,16 @@ impl Workspace {
             }
             WsAction::RefreshObjects => self.load_objects(ctx),
             WsAction::SwitchDatabase(db) => {
+                if self.defer_transaction_action(TransactionAction::Database(db.clone())) { return; }
+                self.reset_query_connections();
                 self.schema.clear();
                 self.tabs.retain(|t| !matches!(t.kind, TabKind::Table(_) | TabKind::Diagram(_)));
                 self.active = 0;
                 self.load_init(ctx, Some(db));
             }
             WsAction::SwitchSchema(s) => {
+                if self.defer_transaction_action(TransactionAction::Schema(s.clone())) { return; }
+                self.reset_query_connections();
                 self.schema = s;
                 self.load_objects(ctx);
             }
@@ -881,6 +1032,16 @@ impl Workspace {
         let ctx = ui.ctx().clone();
         set_sh_ctx(&ctx);
         self.poll(&ctx, sh);
+        if let Some(session) = self.session.clone() {
+            let mut completed_actions = Vec::new();
+            for tab in &mut self.tabs {
+                if let TabKind::Query(q) = &mut tab.kind {
+                    let mut cx = TabCtx { ctx: &ctx, session: &session, settings: sh.settings, store: sh.store, actions: &mut completed_actions };
+                    q.poll(&mut cx);
+                }
+            }
+            for action in completed_actions { self.handle(action, sh, &ctx); }
+        }
         let mut actions: Vec<WsAction> = Vec::new();
 
         self.env_ribbon(&ctx);
@@ -950,7 +1111,7 @@ impl Workspace {
                 let mut cx = TabCtx { ctx: &ctx, session: &session, settings: sh.settings, store: sh.store, actions: &mut actions };
                 match &mut self.tabs[active].kind {
                     TabKind::Table(t) => t.ui(ui, &mut cx, &catalog),
-                    TabKind::Query(q) => q.ui(ui, &mut cx, &catalog),
+                    TabKind::Query(q) => q.ui(ui, &mut cx, &catalog, self.context_ready),
                     TabKind::Admin(a) => admin_ui(a, ui, &mut cx),
                     TabKind::Metrics(m) => m.ui(ui, &mut cx, sh.boards, sh.store),
                     TabKind::Diagram(d) => d.ui(ui, &mut cx),
@@ -973,8 +1134,10 @@ impl Workspace {
             if !open { self.right = RightPanel::None; }
         }
 
-        self.shortcuts(&ctx, sh, &mut actions);
-        self.script_step(&ctx, sh, &mut actions);
+        if self.transaction_action.is_none() {
+            self.shortcuts(&ctx, sh, &mut actions);
+            self.script_step(&ctx, sh, &mut actions);
+        }
 
         if let Some(mut m) = self.modal.take() {
             let info = dialogs::ModalInfo { session: &session, cfg: &self.cfg, current_db: &self.current_db, objects: &self.objects, databases: &self.databases, queries: sh.queries };
@@ -1003,6 +1166,7 @@ impl Workspace {
         for a in actions {
             self.handle(a, sh, &ctx);
         }
+        self.transaction_dialog(&ctx, sh);
     }
 
     /// Replays one STRATA_SCRIPT step every ~0.7 s once the connection is idle. Steps:
@@ -1130,7 +1294,7 @@ impl Workspace {
                             if ui.button("Run all statements").clicked() { actions.push(WsAction::RunQuery { tab_id: *id, sql: q.sql.clone() }); ui.close(); }
                             if ui.button("Save query…").clicked() { actions.push(WsAction::SaveQuery(*id)); ui.close(); }
                         } else { ui.label(dim("Open a query tab to run SQL")); }
-                        if ui.add_enabled(self.session.as_ref().is_some_and(|session| session.canceller.is_some()), egui::Button::new("Cancel running query")).clicked() { if let Some(session) = &self.session { session.cancel(); } ui.close(); }
+                        if ui.button("Cancel running query").clicked() { self.cancel_active_query(); ui.close(); }
                     });
                     ui.menu_button("Help", |ui| {
                         if ui.button("Connection information").clicked() {
@@ -1223,28 +1387,26 @@ impl Workspace {
         let db_label = if connection_name == db_name { db_name.clone() } else { format!("{connection_name} · {db_name}") };
         let db_btn = ui.add_sized(vec2(db_width, 32.0), egui::Button::new(RichText::new(format!("{db_label} ▾")).font(medium(13.0)).color(pal.text)).truncate().frame(false))
             .on_hover_text(format!("{} · {}", self.cfg.display_name(), db_name));
-        egui::Popup::menu(&db_btn).show(|ui| {
+        if db_btn.clicked() { self.database_picker.reset(); }
+        egui::Popup::menu(&db_btn).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             ui.set_min_width(200.0);
             ui.label(dim(self.cfg.display_name()));
             ui.separator();
-            for db in self.databases.clone() {
-                if ui.selectable_label(db == self.current_db, &db).clicked() {
-                    if db != self.current_db { actions.push(WsAction::SwitchDatabase(db)); }
-                    ui.close();
-                }
+            if let Some(db) = self.database_picker.show(ui, &self.databases, &self.current_db) {
+                if db != self.current_db { actions.push(WsAction::SwitchDatabase(db)); }
+                ui.close();
             }
         });
         let dialect = self.cfg.driver.dialect();
         if !self.schema.is_empty() && self.schema != self.current_db && !matches!(dialect, Dialect::MySql | Dialect::ClickHouse | Dialect::Mongo) {
             ui.label(faint("/"));
             let sb = ui.add_sized(vec2(ui.available_width().clamp(50.0, 90.0), 32.0), egui::Button::new(RichText::new(format!("{} ▾", self.schema)).color(pal.text_dim)).truncate().frame(false)).on_hover_text(&self.schema);
-            egui::Popup::menu(&sb).show(|ui| {
+            if sb.clicked() { self.schema_picker.reset(); }
+            egui::Popup::menu(&sb).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                 ui.set_min_width(180.0);
-                for schema in self.schemas.clone() {
-                    if ui.selectable_label(schema == self.schema, &schema).clicked() {
-                        if schema != self.schema { actions.push(WsAction::SwitchSchema(schema)); }
-                        ui.close();
-                    }
+                if let Some(schema) = self.schema_picker.show(ui, &self.schemas, &self.schema) {
+                    if schema != self.schema { actions.push(WsAction::SwitchSchema(schema)); }
+                    ui.close();
                 }
             });
         }
@@ -1932,9 +2094,11 @@ impl Workspace {
         if let Some(i) = close {
             if i > self.tabs.len() {
                 let keep = usize::MAX - i;
-                let kept = self.tabs.remove(keep);
-                self.tabs = vec![kept];
-                self.active = 0;
+                let id = self.tabs[keep].id;
+                if !self.defer_transaction_action(TransactionAction::CloseOthers(id)) {
+                    self.tabs.retain(|tab| tab.id == id);
+                    self.active = 0;
+                }
             } else {
                 self.close_tab(i);
             }
@@ -2006,9 +2170,7 @@ impl Workspace {
             self.active += 1;
         }
         if ctx.input_mut(|i| i.consume_key(cmd, Key::Period)) {
-            if let Some(s) = &self.session {
-                s.cancel();
-            }
+            self.cancel_active_query();
         }
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
         let id = tab.id;
@@ -2191,6 +2353,65 @@ fn sh_ctx() -> egui::Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn navigation_and_closure_preserve_pending_query_work() {
+        let ctx = egui::Context::default();
+        let mut cfg = ConnectionConfig::new(DriverKind::Sqlite);
+        cfg.path = std::env::temp_dir().join(format!("strata-navigation-{}.sqlite", uuid::Uuid::new_v4())).display().to_string();
+        let mut workspace = Workspace::open(cfg.clone(), &ctx);
+        workspace.connecting = None;
+        let session = Arc::new(Session::open(cfg.clone()).await.unwrap());
+        workspace.session = Some(session.clone());
+        workspace.current_db = "original".into();
+        let store = Store::for_test(std::env::temp_dir().join(format!("strata-navigation-store-{}", uuid::Uuid::new_v4())));
+        let settings = Settings::default();
+        let id = workspace.open_query("SELECT 1".into(), None);
+        let mut actions = Vec::new();
+        let mut cx = TabCtx { ctx: &ctx, session: &session, settings: &settings, store: &store, actions: &mut actions };
+        let TabKind::Query(q) = &mut workspace.tabs[0].kind else { panic!("query tab") };
+        q.start("SELECT 1".into(), &cx, cfg, "main".into());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while q.is_running() && std::time::Instant::now() < deadline { tokio::time::sleep(std::time::Duration::from_millis(5)).await; q.poll(&mut cx); }
+        assert!(q.has_pending_transaction());
+        assert!(!q.is_running());
+        workspace.close_tab(0);
+        assert_eq!(workspace.tabs.len(), 1);
+        assert!(workspace.transaction_action == Some(TransactionAction::CloseTab(id)));
+        let mut queries = Vec::new(); let mut boards = Vec::new(); let mut toasts = Toasts::default(); let mut edit = None;
+        let mut switch = None; let mut home = false; let mut settings_open = false; let mut command = None; let mut create = None; let mut app_request = None;
+        let mut sh = Shared { store: &store, settings: &settings, queries: &mut queries, boards: &mut boards, toasts: &mut toasts, edit_connection: &mut edit, workspace_choices: &[], switch_workspace: &mut switch, show_home: &mut home, open_settings: &mut settings_open, workspace_command: &mut command, create_connection: &mut create, app_request: &mut app_request };
+        let mut initial = ctx.run_ui(egui::RawInput::default(), |_ui| workspace.transaction_dialog(&ctx, &mut sh));
+        initial.textures_delta.clear();
+        let escape = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let mut output = ctx.run_ui(egui::RawInput { events: vec![escape], ..Default::default() }, |_ui| workspace.transaction_dialog(&ctx, &mut sh));
+        output.textures_delta.clear();
+        assert!(workspace.transaction_action.is_none(), "Escape cancels the close request");
+        assert!(workspace.has_pending_transactions());
+        workspace.handle(WsAction::SwitchDatabase("other".into()), &mut sh, &ctx);
+        assert_eq!(workspace.current_db, "original");
+        assert!(workspace.transaction_action == Some(TransactionAction::Database("other".into())));
+        workspace.transaction_action = None;
+        workspace.handle(WsAction::SetAutoCommit { tab: id, enabled: true }, &mut sh, &ctx);
+        assert!(matches!(&workspace.tabs[0].kind, TabKind::Query(q) if !q.auto_commit));
+        assert!(workspace.transaction_action == Some(TransactionAction::AutoCommit(id, true)));
+        workspace.transaction_action = None;
+        workspace.reconnect(&ctx);
+        assert!(workspace.transaction_action == Some(TransactionAction::Reconnect));
+        workspace.transaction_action = None;
+        workspace.close_tab(0);
+        let TabKind::Query(q) = &mut workspace.tabs[0].kind else { panic!("query tab") };
+        q.finish_transaction(&ctx, false);
+        while q.transaction_busy() && std::time::Instant::now() < deadline { tokio::time::sleep(std::time::Duration::from_millis(5)).await; q.poll_transaction(); }
+        assert!(!q.has_pending_transaction());
+        workspace.transaction_dialog(&ctx, &mut sh);
+        assert!(workspace.tabs.is_empty(), "close continues only after successful resolution");
+        let id = workspace.open_query("SELECT 1".into(), None);
+        workspace.context_ready = false;
+        workspace.handle(WsAction::RunQuery { tab_id: id, sql: "SELECT 1".into() }, &mut sh, &ctx);
+        workspace.run_gated(Gated::Query { tab: id, sql: "SELECT 1".into() }, &mut sh);
+        assert!(matches!(&workspace.tabs[0].kind, TabKind::Query(q) if !q.is_running() && !q.has_pending_transaction()), "neither Run nor a delayed approval may execute during a database transition");
+    }
 
     #[test]
     fn selected_table_has_context_menu_and_options_button() {

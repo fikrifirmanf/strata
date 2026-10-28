@@ -6,6 +6,8 @@ use super::workspace::{TabCtx, WsAction};
 use super::{dim, faint, icon_button, p, paint_icon, segmented, Icon, ToastKind};
 use crate::db::QueryResult;
 use crate::model::Dialect;
+use crate::model::ConnectionConfig;
+use crate::query_transaction::{self, ManagedQuery, TransactionState};
 use crate::runtime::{take, Task};
 use egui::{vec2, Color32, CornerRadius, RichText, Stroke, Ui};
 
@@ -131,6 +133,11 @@ pub struct QueryTab {
     /// Statements that returned no rows: (ok, text).
     pub messages: Vec<(bool, String)>,
     task: Option<Task<anyhow::Result<Vec<QueryResult>>>>,
+    pub auto_commit: bool,
+    managed: Option<ManagedQuery>,
+    finish_task: Option<Task<anyhow::Result<()>>>,
+    finish_message: &'static str,
+    pub transaction_error: Option<String>,
     running_sql: String,
     pub saved_id: Option<uuid::Uuid>,
     pub dirty: bool,
@@ -151,6 +158,11 @@ impl QueryTab {
             results: vec![],
             messages: vec![],
             task: None,
+            auto_commit: false,
+            managed: None,
+            finish_task: None,
+            finish_message: "",
+            transaction_error: None,
             running_sql: String::new(),
             saved_id: None,
             dirty: false,
@@ -165,6 +177,39 @@ impl QueryTab {
         self.task.is_some()
     }
 
+    pub fn transaction_busy(&self) -> bool { self.task.is_some() || self.finish_task.is_some() }
+    pub fn has_pending_transaction(&self) -> bool {
+        self.managed.as_ref().is_some_and(|query| query.pending()) || (!self.auto_commit && self.managed.is_some() && self.is_running())
+    }
+    pub fn transaction_state(&self) -> TransactionState { self.managed.as_ref().map(|query| query.state()).unwrap_or(TransactionState::Idle) }
+    pub fn reset_connection(&mut self) { if !self.has_pending_transaction() && !self.transaction_busy() { self.managed = None; } }
+    pub fn cancel(&self, session: &crate::runtime::Session) {
+        if let Some(query) = &self.managed { if !self.auto_commit { query.cancel(); return; } }
+        session.cancel();
+    }
+    pub fn finish_transaction(&mut self, ctx: &egui::Context, commit: bool) {
+        if self.transaction_busy() { return; }
+        let Some(query) = self.managed.clone() else { return };
+        self.transaction_error = None;
+        self.finish_message = if commit { "Transaction committed" } else { "Transaction rolled back" };
+        self.finish_task = Some(Task::spawn(ctx, async move { query.finish(commit).await }));
+    }
+    pub fn abandon_transaction(&mut self, ctx: &egui::Context) {
+        if self.transaction_busy() { return; }
+        let Some(query) = self.managed.clone() else { return };
+        self.transaction_error = None;
+        self.finish_message = "Connection closed; the previous transaction outcome remains unknown";
+        self.finish_task = Some(Task::spawn(ctx, async move { query.abandon().await; Ok(()) }));
+    }
+    pub fn poll_transaction(&mut self) {
+        if let Some(result) = take(&mut self.finish_task) {
+            match result {
+                Ok(()) => self.messages.push((true, self.finish_message.into())),
+                Err(error) => { let error = format!("{error:#}"); self.transaction_error = Some(error.clone()); self.messages.push((false, error)); }
+            }
+        }
+    }
+
     /// The text that "Run current" would execute: the selection, or the statement under the caret.
     pub fn current_sql(&self) -> String {
         if let Some(sel) = self.editor.selected_text(&self.sql) {
@@ -177,13 +222,19 @@ impl QueryTab {
     }
 
     /// Called by the workspace once parameters are bound and safe mode approved.
-    pub fn start(&mut self, sql: String, cx: &TabCtx) {
-        if sql.trim().is_empty() {
+    pub fn start(&mut self, sql: String, cx: &TabCtx, cfg: ConnectionConfig, schema: String) {
+        if sql.trim().is_empty() || self.transaction_busy() {
             return;
         }
         cx.session.log(sql.clone(), true);
         self.running_sql = sql.clone();
         let timeout = cx.settings.query_timeout_secs;
+        if !self.auto_commit && query_transaction::supported(&cfg) {
+            let query = self.managed.get_or_insert_with(|| ManagedQuery::new(cfg, schema)).clone();
+            query.prepare_run();
+            self.task = Some(Task::spawn(cx.ctx, async move { query.execute(&sql, timeout).await }));
+            return;
+        }
         self.task = Some(cx.session.spawn(cx.ctx, move |d| async move {
             let mut d = d.lock().await;
             if timeout > 0 {
@@ -197,7 +248,8 @@ impl QueryTab {
         }));
     }
 
-    fn poll(&mut self, cx: &mut TabCtx) {
+    pub(super) fn poll(&mut self, cx: &mut TabCtx) {
+        self.poll_transaction();
         if let Some(r) = take(&mut self.ask_task) {
             self.ask_answer = Some(r.map_err(|e| format!("{e:#}")));
         }
@@ -242,7 +294,7 @@ impl QueryTab {
         }
     }
 
-    pub fn ui(&mut self, ui: &mut Ui, cx: &mut TabCtx, catalog: &Catalog) {
+    pub fn ui(&mut self, ui: &mut Ui, cx: &mut TabCtx, catalog: &Catalog, context_ready: bool) {
         self.poll(cx);
         let pal = p();
         let dialect = cx.session.dialect();
@@ -253,7 +305,7 @@ impl QueryTab {
                 if self.is_running() {
                     let b = egui::Button::new(RichText::new("Stop  ⌘.").font(super::semibold(12.5)).color(Color32::WHITE)).fill(pal.danger).corner_radius(CornerRadius::same(255)).min_size(vec2(0.0, 32.0));
                     if ui.add(b).clicked() {
-                        cx.session.cancel();
+                        self.cancel(cx.session);
                     }
                     ui.add(egui::Spinner::new().size(14.0).color(pal.accent));
                     if let Some(t) = &self.task {
@@ -262,11 +314,11 @@ impl QueryTab {
                     }
                 } else {
                     let b = egui::Button::new(RichText::new("▶  Run  ⌘↩").font(super::semibold(12.5)).color(pal.on_accent)).fill(pal.accent).corner_radius(CornerRadius::same(255)).min_size(vec2(0.0, 32.0));
-                    if ui.add(b).on_hover_text("Run the statement under the caret, or the selection").clicked() {
+                    if ui.add_enabled(context_ready && !self.transaction_busy(), b).on_hover_text("Run the statement under the caret, or the selection").clicked() {
                         cx.actions.push(WsAction::RunQuery { tab_id: self.id, sql: self.current_sql() });
                     }
                     let b = egui::Button::new(RichText::new("Run all  ⌘⇧↩").size(12.5).color(pal.text)).fill(Color32::TRANSPARENT).stroke(Stroke::new(1.0, pal.border)).corner_radius(CornerRadius::same(255)).min_size(vec2(0.0, 32.0));
-                    if ui.add(b).clicked() {
+                    if ui.add_enabled(context_ready && !self.transaction_busy(), b).clicked() {
                         cx.actions.push(WsAction::RunQuery { tab_id: self.id, sql: self.sql.clone() });
                     }
                 }
@@ -291,6 +343,23 @@ impl QueryTab {
                         run_sparkline(ui, &self.runs);
                     }
                 });
+            });
+            ui.horizontal_wrapped(|ui| {
+                let supported = query_transaction::supported(&cx.session.cfg);
+                let mut auto_commit = self.auto_commit || !supported;
+                if ui.add_enabled(supported && !self.transaction_busy(), egui::Checkbox::new(&mut auto_commit, "Auto-commit")).on_hover_text(if supported { "When off, changes stay pending until Commit or Rollback" } else { "Persistent manual transactions are unavailable for this connection" }).changed() {
+                    cx.actions.push(WsAction::SetAutoCommit { tab: self.id, enabled: auto_commit });
+                }
+                if supported && !self.auto_commit {
+                    let state = self.transaction_state();
+                    if ui.add_enabled(state == TransactionState::Active && !self.transaction_busy(), egui::Button::new("Commit")).clicked() { self.finish_transaction(cx.ctx, true); }
+                    if ui.add_enabled(self.has_pending_transaction() && !self.transaction_busy(), egui::Button::new("Rollback")).clicked() { self.finish_transaction(cx.ctx, false); }
+                    let status = if self.finish_task.is_some() { "Finishing transaction…" } else { match state { TransactionState::Idle => "Transaction starts on Run", TransactionState::Active => "Pending transaction", TransactionState::Failed => "Failed transaction — Rollback required", TransactionState::Unknown => "Outcome unknown — Rollback or close connection" } };
+                    ui.label(RichText::new(status).size(11.5).color(if state == TransactionState::Idle { pal.text_dim } else { pal.warning }));
+                    if state == TransactionState::Unknown && !self.transaction_busy() && ui.button("Close uncertain connection…").clicked() {
+                        cx.actions.push(WsAction::ResolveUncertain(self.id));
+                    }
+                }
             });
         });
         ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, pal.separator));
@@ -319,10 +388,10 @@ impl QueryTab {
         if ev.changed {
             self.dirty = true;
         }
-        if ev.run_current && !self.is_running() {
+        if ev.run_current && context_ready && !self.transaction_busy() {
             cx.actions.push(WsAction::RunQuery { tab_id: self.id, sql: self.current_sql() });
         }
-        if ev.run_all && !self.is_running() {
+        if ev.run_all && context_ready && !self.transaction_busy() {
             cx.actions.push(WsAction::RunQuery { tab_id: self.id, sql: self.sql.clone() });
         }
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::F)) {

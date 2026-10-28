@@ -16,6 +16,7 @@ mod mcp;
 #[cfg(target_os = "macos")]
 mod macos_menu;
 mod model;
+mod query_transaction;
 mod runtime;
 mod store;
 mod tableplus;

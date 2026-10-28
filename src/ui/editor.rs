@@ -155,6 +155,7 @@ struct Completion {
     start_char: usize,
     items: Vec<Suggestion>,
     selected: usize,
+    allow_empty: bool,
 }
 
 pub struct SqlEditor {
@@ -163,7 +164,7 @@ pub struct SqlEditor {
     pub cursor_char: usize,
     pub selection_chars: Option<(usize, usize)>,
     pending_cursor: Option<(usize, usize)>,
-    dismissed_at: Option<usize>,
+    dismissed_at: Option<(usize, String)>,
 }
 
 #[derive(Default)]
@@ -292,6 +293,11 @@ impl SqlEditor {
         let mut ev = EditorEvents::default();
         let font = FontId::monospace(font_size);
         let has_focus = ui.memory(|m| m.has_focus(self.id));
+        let explicit_completion = has_focus && ui.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Space));
+        if explicit_completion { self.dismissed_at = None; }
+        let previous_cursor = self.cursor_char;
+        let mut accepted = false;
+        let mut reveal_completion = false;
 
         if has_focus {
             ev.run_all = ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Enter));
@@ -308,20 +314,22 @@ impl SqlEditor {
             if let Some(c) = &mut self.completion {
                 if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowDown)) {
                     c.selected = (c.selected + 1) % c.items.len().max(1);
+                    reveal_completion = true;
                 }
                 if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp)) {
                     c.selected = (c.selected + c.items.len().max(1) - 1) % c.items.len().max(1);
+                    reveal_completion = true;
                 }
                 if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab) || i.consume_key(Modifiers::NONE, Key::Enter)) {
                     accept = c.items.get(c.selected).cloned();
                 }
                 if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-                    self.dismissed_at = Some(self.cursor_char);
+                    self.dismissed_at = Some((self.cursor_char, text.clone()));
                     self.completion = None;
                 }
             }
         }
-        if let (Some(s), Some(c)) = (accept, self.completion.take()) {
+        if let Some((s, c)) = accept.and_then(|s| self.completion.take().map(|c| (s, c))) {
             let start = char_to_byte(text, c.start_char);
             let end = char_to_byte(text, self.cursor_char);
             text.replace_range(start..end, &s.text);
@@ -330,6 +338,8 @@ impl SqlEditor {
                 caret -= 1;
             }
             self.pending_cursor = Some((caret, caret));
+            self.dismissed_at = Some((caret, text.clone()));
+            accepted = true;
             ev.changed = true;
         }
 
@@ -366,6 +376,7 @@ impl SqlEditor {
                     .code_editor()
                     .frame(egui::Frame::NONE)
                     .lock_focus(true)
+                    .event_filter(egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true })
                     .desired_width(f32::INFINITY)
                     .desired_rows(12)
                     .layouter(&mut layouter);
@@ -438,31 +449,39 @@ impl SqlEditor {
         }
 
         // Refresh completion list from the word before the caret.
-        if has_focus && (out.response.changed() || self.completion.is_some()) {
+        let has_focus = out.response.has_focus();
+        if has_focus && !accepted && (out.response.changed() || self.completion.is_some() || explicit_completion) {
             let at = char_to_byte(text, self.cursor_char);
             let before = &text[..at];
-            let start = before.rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.')).map(|i| i + 1).unwrap_or(0);
+            let start = before.char_indices().rev().find(|(_, c)| !(c.is_alphanumeric() || *c == '_' || *c == '.')).map(|(i, c)| i + c.len_utf8()).unwrap_or(0);
             let prefix = &before[start..];
             let in_string = tokenize(before).last().map(|t| matches!(t.2, Tok::Single | Tok::Double | Tok::Comment) && t.1 >= at).unwrap_or(false);
             let start_char = byte_to_char(text, start);
-            if prefix.is_empty() || in_string || self.dismissed_at == Some(self.cursor_char) || prefix.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            let dismissed = self.dismissed_at.as_ref().is_some_and(|(cursor, value)| *cursor == self.cursor_char && value == text);
+            let allow_empty = explicit_completion || (previous_cursor == self.cursor_char && !out.response.changed() && self.completion.as_ref().is_some_and(|c| c.allow_empty && c.start_char == start_char));
+            if (prefix.is_empty() && !allow_empty) || in_string || dismissed || self.selection_chars.is_some() || prefix.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
                 self.completion = None;
             } else {
-                let items = suggestions(text, prefix, catalog);
-                let keep = self.completion.as_ref().map(|c| c.selected).unwrap_or(0);
-                self.completion = (!items.is_empty()).then(|| Completion { start_char, selected: keep.min(items.len() - 1), items });
+                let statement = self.current_statement(text).map(|(s, e)| &text[s..e]).unwrap_or(text);
+                let items = suggestions(statement, prefix, catalog);
+                let keep = if out.response.changed() || previous_cursor != self.cursor_char { 0 } else { self.completion.as_ref().map(|c| c.selected).unwrap_or(0) };
+                self.completion = (!items.is_empty()).then(|| Completion { start_char, selected: keep.min(items.len() - 1), items, allow_empty });
             }
         }
-        if !has_focus {
+        let over_popup = ui.ctx().pointer_hover_pos().is_some_and(|pos| ui.ctx().layer_id_at(pos) == Some(egui::LayerId::new(egui::Order::Foreground, self.id.with("completion"))));
+        if !has_focus && !over_popup {
             self.completion = None;
         }
 
         // Popup under the caret.
         if let Some(c) = &mut self.completion {
             let caret = out.galley.pos_from_cursor(CCursor::new(self.cursor_char));
-            let anchor = out.galley_pos + caret.left_bottom().to_vec2() + egui::vec2(0.0, 4.0);
+            let mut anchor = out.galley_pos + caret.left_bottom().to_vec2() + egui::vec2(0.0, 4.0);
+            let viewport = ui.ctx().content_rect().shrink(8.0);
+            anchor.x = anchor.x.clamp(viewport.left(), (viewport.right() - 310.0).max(viewport.left()));
+            if anchor.y + 235.0 > viewport.bottom() { anchor.y = (anchor.y - 250.0).max(viewport.top()); }
             let mut clicked = None;
-            egui::Area::new(self.id.with("completion")).order(egui::Order::Tooltip).fixed_pos(anchor).show(ui.ctx(), |ui| {
+            egui::Area::new(self.id.with("completion")).order(egui::Order::Foreground).fixed_pos(anchor).show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(4)).show(ui, |ui| {
                     ui.set_width(300.0);
                     egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
@@ -479,7 +498,7 @@ impl SqlEditor {
                                 ui.label(egui::RichText::new(s.kind).size(10.5).color(color));
                                 r
                             });
-                            if selected {
+                            if selected && (reveal_completion || out.response.changed() || explicit_completion) {
                                 resp.inner.scroll_to_me(None);
                             }
                             if resp.inner.clicked() {
@@ -495,9 +514,11 @@ impl SqlEditor {
                 let start = char_to_byte(text, c.start_char);
                 let end = char_to_byte(text, self.cursor_char);
                 text.replace_range(start..end, &s.text);
-                let caret = c.start_char + s.text.chars().count();
+                let caret = c.start_char + s.text.chars().count() - usize::from(s.text.ends_with("()"));
                 self.pending_cursor = Some((caret, caret));
+                self.dismissed_at = Some((caret, text.clone()));
                 self.completion = None;
+                ui.memory_mut(|m| m.request_focus(self.id));
                 ev.changed = true;
             }
         }
@@ -508,6 +529,109 @@ impl SqlEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn frame(ctx: &egui::Context, editor: &mut SqlEditor, sql: &mut String, events: Vec<egui::Event>) -> EditorEvents {
+        frame_output(ctx, editor, sql, events).0
+    }
+
+    fn frame_output(ctx: &egui::Context, editor: &mut SqlEditor, sql: &mut String, events: Vec<egui::Event>) -> (EditorEvents, Vec<egui::epaint::ClippedShape>) {
+        let mut result = EditorEvents::default();
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))), events, ..Default::default() }, |ui| {
+            result = editor.show(ui, sql, &Catalog::default(), 14.0, false, false);
+        });
+        output.textures_delta.clear();
+        (result, output.shapes)
+    }
+
+    fn key(key: Key, modifiers: Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    #[test]
+    fn completion_survives_idle_frames_and_accepts_without_reopening() {
+        let ctx = egui::Context::default();
+        let mut editor = SqlEditor::new(egui::Id::unique("persistent-completion"));
+        let mut sql = String::new();
+        frame(&ctx, &mut editor, &mut sql, vec![]);
+        ctx.memory_mut(|m| m.request_focus(editor.id));
+        frame(&ctx, &mut editor, &mut sql, vec![egui::Event::Text("sel".into())]);
+        assert!(editor.completion.is_some());
+        for _ in 0..3 { frame(&ctx, &mut editor, &mut sql, vec![]); }
+        assert!(editor.completion.is_some(), "idle frames must retain suggestions");
+        frame(&ctx, &mut editor, &mut sql, vec![key(Key::Tab, Modifiers::NONE)]);
+        assert_eq!(sql, "SELECT");
+        assert!(editor.completion.is_none());
+    }
+
+    #[test]
+    fn explicit_completion_reopens_after_escape_and_run_shortcut_is_preserved() {
+        let ctx = egui::Context::default();
+        let mut editor = SqlEditor::new(egui::Id::unique("explicit-completion"));
+        let mut sql = String::new();
+        frame(&ctx, &mut editor, &mut sql, vec![]);
+        ctx.memory_mut(|m| m.request_focus(editor.id));
+        frame(&ctx, &mut editor, &mut sql, vec![egui::Event::Text("sel".into())]);
+        frame(&ctx, &mut editor, &mut sql, vec![key(Key::Escape, Modifiers::NONE)]);
+        assert!(editor.completion.is_none());
+        frame(&ctx, &mut editor, &mut sql, vec![key(Key::Space, Modifiers::CTRL)]);
+        assert!(editor.completion.is_some());
+        let result = frame(&ctx, &mut editor, &mut sql, vec![key(Key::Enter, Modifiers::COMMAND)]);
+        assert!(result.run_current);
+        assert_eq!(sql, "sel");
+    }
+
+    #[test]
+    fn comments_and_strings_do_not_offer_completion() {
+        let ctx = egui::Context::default();
+        let mut editor = SqlEditor::new(egui::Id::unique("string-completion"));
+        for input in ["'sel", "-- sel", "/* sel"] {
+            let mut sql = String::new();
+            frame(&ctx, &mut editor, &mut sql, vec![]);
+            ctx.memory_mut(|m| m.request_focus(editor.id));
+            frame(&ctx, &mut editor, &mut sql, vec![egui::Event::Text(input.into())]);
+            assert!(editor.completion.is_none(), "{input}");
+        }
+    }
+
+    #[test]
+    fn mouse_acceptance_keeps_focus_and_places_function_caret_inside_parentheses() {
+        let ctx = egui::Context::default();
+        let mut editor = SqlEditor::new(egui::Id::unique("mouse-completion"));
+        let mut sql = String::new();
+        frame(&ctx, &mut editor, &mut sql, vec![]);
+        ctx.memory_mut(|m| m.request_focus(editor.id));
+        frame(&ctx, &mut editor, &mut sql, vec![egui::Event::Text("abs".into())]);
+        let (_, shapes) = frame_output(&ctx, &mut editor, &mut sql, vec![]);
+        fn find(shape: &egui::epaint::Shape) -> Option<egui::Pos2> {
+            match shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == "ABS()" => Some(text.pos + text.galley.size() * 0.5),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(find),
+                _ => None,
+            }
+        }
+        let point = shapes.iter().find_map(|shape| find(&shape.shape)).expect("function suggestion rendered");
+        let button = |pressed| egui::Event::PointerButton { pos: point, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        frame(&ctx, &mut editor, &mut sql, vec![egui::Event::PointerMoved(point), button(true)]);
+        frame(&ctx, &mut editor, &mut sql, vec![button(false)]);
+        assert_eq!(sql, "ABS()");
+        assert!(ctx.memory(|m| m.has_focus(editor.id)));
+        frame(&ctx, &mut editor, &mut sql, vec![egui::Event::Text("1".into())]);
+        assert_eq!(sql, "ABS(1)");
+    }
+
+    #[test]
+    fn explicit_completion_after_whitespace_survives_idle_frames() {
+        let ctx = egui::Context::default();
+        let mut editor = SqlEditor::new(egui::Id::unique("empty-prefix-completion"));
+        let mut sql = String::new();
+        frame(&ctx, &mut editor, &mut sql, vec![]);
+        ctx.memory_mut(|m| m.request_focus(editor.id));
+        frame(&ctx, &mut editor, &mut sql, vec![egui::Event::Text("SELECT ".into())]);
+        frame(&ctx, &mut editor, &mut sql, vec![key(Key::Space, Modifiers::CTRL)]);
+        assert!(editor.completion.is_some());
+        for _ in 0..3 { frame(&ctx, &mut editor, &mut sql, vec![]); }
+        assert!(editor.completion.is_some());
+    }
 
     #[test]
     fn keywords_are_sorted_for_binary_search() {

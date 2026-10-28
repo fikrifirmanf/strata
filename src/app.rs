@@ -176,6 +176,11 @@ impl StrataApp {
         if i >= self.workspaces.len() {
             return;
         }
+        if self.workspaces[i].has_pending_transactions() {
+            self.workspaces[i].request_close(false);
+            self.active = Some(i);
+            return;
+        }
         let ws = self.workspaces.remove(i);
         if let Some(s) = ws.session {
             let d = s.driver.clone();
@@ -187,6 +192,14 @@ impl StrataApp {
             other => other,
         };
         self.remember_open();
+    }
+
+    fn request_quit(&mut self, ctx: &egui::Context) {
+        if let Some(i) = self.workspaces.iter().position(|workspace| workspace.has_pending_transactions()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.workspaces[i].request_close(true);
+            self.active = Some(i);
+        } else { ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
     }
 
     fn remember_open(&mut self) {
@@ -446,6 +459,7 @@ impl StrataApp {
                         if i > self.workspaces.len() {
                             let idx = usize::MAX - i;
                             self.workspaces[idx].reconnect(&ctx);
+                            self.active = Some(idx);
                         } else {
                             self.close_workspace(i);
                         }
@@ -564,6 +578,10 @@ impl eframe::App for StrataApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        for workspace in &mut self.workspaces { workspace.poll_transactions(); }
+        if ctx.input(|i| i.viewport().close_requested()) && self.workspaces.iter().any(|workspace| workspace.has_pending_transactions()) {
+            self.request_quit(&ctx);
+        }
         self.apply_theme(&ctx);
         set_ground_opacity(if self.translucent { 1.0 - self.settings.window_translucency.clamp(0.0, 0.9) } else { 1.0 });
         paint_ground(&ctx);
@@ -653,8 +671,9 @@ impl eframe::App for StrataApp {
                     if let Some(i) = self.workspaces.iter().position(|ws| ws.id() == id) { self.close_workspace(i); }
                 }
                 workspace::WorkspaceCommand::Reconnect(id) => {
-                    if let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id() == id) { ws.reconnect(&ctx); }
+                    if let Some(i) = self.workspaces.iter().position(|ws| ws.id() == id) { self.workspaces[i].reconnect(&ctx); self.active = Some(i); }
                 }
+                workspace::WorkspaceCommand::Quit => self.request_quit(&ctx),
             }
         }
         if let Some(id) = edit_request {
@@ -705,6 +724,7 @@ impl StrataApp {
     fn dispatch_native_menu(&mut self, ctx: &egui::Context) {
         for action in crate::macos_menu::NativeMenu::take_actions() {
             match action.as_str() {
+                "quit" => self.request_quit(ctx),
                 "new_connection" => { self.active = None; self.home.begin_connection(); }
                 "connections" => self.active = None,
                 "settings" => self.settings_open = !self.settings_open,
@@ -753,8 +773,9 @@ impl StrataApp {
                     if let Some(i) = self.workspaces.iter().position(|workspace| workspace.id() == id) { self.close_workspace(i); }
                 }
                 workspace::WorkspaceCommand::Reconnect(id) => {
-                    if let Some(workspace) = self.workspaces.iter_mut().find(|workspace| workspace.id() == id) { workspace.reconnect(ctx); }
+                    if let Some(i) = self.workspaces.iter().position(|workspace| workspace.id() == id) { self.workspaces[i].reconnect(ctx); self.active = Some(i); }
                 }
+                workspace::WorkspaceCommand::Quit => self.request_quit(ctx),
             }
         }
         if let Some(id) = edit_request {
