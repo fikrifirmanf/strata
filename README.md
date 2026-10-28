@@ -30,7 +30,9 @@ Builds for macOS (universal, Apple silicon and Intel), Windows (x86_64) and Linu
 - **Windows:** run `Strata-<version>-windows-x86_64-setup.exe`. It installs for your user without an admin prompt, adds a Start menu entry and an uninstaller, and upgrades in place. The `.zip` is a portable copy that runs from any folder. Neither is code-signed yet, so SmartScreen may ask you to confirm with **More info → Run anyway**.
 - **Linux:** unpack the `.tar.gz`, put `strata` on your `PATH`, and copy `strata.desktop` and `strata.png` into `~/.local/share/applications` and `~/.local/share/icons` if you want a launcher entry.
 
-Strata checks GitHub for a newer release when it starts and shows a popup when one is out. **Help → Check for Updates** checks on demand, and the About window can turn the startup check off.
+Strata checks GitHub for a newer release when it starts and shows a popup when one is out. **Update** downloads the release, checks it against `SHA256SUMS.txt`, installs it over the current copy and restarts Strata. **Help → Check for Updates** checks on demand, and the About window can turn the startup check off. The portable Windows `.zip` can't replace itself, so there **Update** opens the release page instead.
+
+**File → New Window** (⌘⇧N on macOS, Ctrl+Shift+N elsewhere) starts another Strata window with its own connections. Only the first window's open connections are restored at the next launch.
 
 ## Command line
 
@@ -152,7 +154,7 @@ The driver picker filters OLTP databases, OLAP/warehouses and operational stores
 - Saved queries (per connection or global) and searchable query history with retention
 
 **Database tools**
-- Search and scroll databases/schemas from the header dropdowns, or switch database with ⌘K; create database or schema
+- Search and scroll databases/schemas from the header dropdowns, or switch database with ⌘K (Ctrl+K on Windows and Linux); create database or schema
 - Create, rename, clone, truncate and drop tables
 - Import CSV / JSON (into an existing table or a new one) and SQL dumps
 - Export a table or a result to CSV / JSON / SQL / Markdown / Excel; export many tables at once
@@ -173,7 +175,7 @@ The driver picker filters OLTP databases, OLAP/warehouses and operational stores
 - Native SDK drivers for Oracle, Snowflake, BigQuery, Cassandra, DynamoDB, DuckDB and Vertica (vendor ODBC connections are available)
 - Plugin system, Git-hosted theme repositories, shared connection folders (Dropbox / iCloud sync)
 - SSL client certificates
-- Touch ID unlock and in-place auto-update (Strata finds new releases and links to the download, but doesn't install them itself)
+- Touch ID unlock
 - Remote (HTTP/TLS) MCP server with token management. The stdio server here only allows read-only queries
 - **SSH host-key verification:** tunnels currently accept any host key, like `StrictHostKeyChecking=no`. Don't use SSH tunnels over untrusted networks until pinning is added
 - Separate OS windows per workspace (workspaces live in the left rail instead)

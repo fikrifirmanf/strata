@@ -5,6 +5,7 @@
 //!   strata postgres://u@host/db    open a connection from a URL (also mysql://, redis://, ...)
 //!   strata path/to/file.sqlite     open a SQLite file
 //!   strata <target> --run "SQL"   open a target and run a query in a new tab
+//!   strata --new-window            open another window without restoring the last session
 //!   strata mcp                     run the stdio MCP server for coding agents
 
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
@@ -59,6 +60,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let launch = launch_targets(&args);
+    let new_window = args.iter().any(|a| a == app::NEW_WINDOW_FLAG);
     let run_sql = args.iter().position(|a| a == "--run").and_then(|i| args.get(i + 1)).cloned();
     let translucent = store.load_settings().window_translucency > 0.0 && cfg!(any(target_os = "macos", target_os = "windows"));
     let mut viewport = egui::ViewportBuilder::default()
@@ -76,6 +78,6 @@ fn main() -> anyhow::Result<()> {
         viewport = viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    eframe::run_native("Strata", options, Box::new(move |cc| Ok(Box::new(app::StrataApp::new(cc, store, launch, run_sql)))))
+    eframe::run_native("Strata", options, Box::new(move |cc| Ok(Box::new(app::StrataApp::new(cc, store, launch, run_sql, new_window)))))
         .map_err(|e| anyhow::anyhow!("{e}"))
 }

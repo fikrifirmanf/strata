@@ -11,6 +11,9 @@ use egui::{vec2, RichText, Stroke};
 use std::time::Instant;
 use uuid::Uuid;
 
+/// Marks a process started by New Window.
+pub const NEW_WINDOW_FLAG: &str = "--new-window";
+
 pub struct StrataApp {
     store: Store,
     settings: Settings,
@@ -38,12 +41,14 @@ pub struct StrataApp {
     /// `STRATA_SCREENSHOT=out.png`: saves the window once it has settled, then quits. Used for the
     /// README images; reads the framebuffer, so it needs no screen-recording permission.
     screenshot_to: Option<String>,
+    /// False for windows opened with New Window: they don't record or restore the open session.
+    primary: bool,
     #[cfg(target_os = "macos")]
     native_menu: Option<crate::macos_menu::NativeMenu>,
 }
 
 impl StrataApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, store: Store, launch: Vec<ConnectionConfig>, run_on_open: Option<String>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, store: Store, launch: Vec<ConnectionConfig>, run_on_open: Option<String>, new_window: bool) -> Self {
         install_fonts(&cc.egui_ctx);
         crate::ui::install_driver_logos(&cc.egui_ctx);
         let settings = store.load_settings();
@@ -64,11 +69,11 @@ impl StrataApp {
         #[cfg(target_os = "macos")]
         let native_menu = crate::macos_menu::NativeMenu::install().ok();
         let mut updates = crate::ui::about::Updates::default();
-        if settings.check_updates {
+        if settings.check_updates && !new_window {
             updates.check(&cc.egui_ctx, false);
         }
         let mut pending_open = launch;
-        if settings.reopen_workspaces && pending_open.is_empty() {
+        if settings.reopen_workspaces && pending_open.is_empty() && !new_window {
             pending_open = settings.open_workspaces.iter().filter_map(|id| conns.connections.iter().find(|c| c.id == *id).cloned()).collect();
         }
         Self {
@@ -94,6 +99,7 @@ impl StrataApp {
             run_on_open,
             translucent,
             screenshot_to: std::env::var("STRATA_SCREENSHOT").ok().filter(|p| !p.is_empty()),
+            primary: !new_window,
             #[cfg(target_os = "macos")]
             native_menu,
         }
@@ -145,7 +151,24 @@ impl StrataApp {
                 self.updates.about_open = true;
                 self.updates.check(ctx, true);
             }
+            Some(workspace::AppRequest::NewWindow) => self.open_new_window(),
             None => {}
+        }
+    }
+
+    /// Starts another Strata process with its own window and connections.
+    fn open_new_window(&mut self) {
+        let result = std::env::current_exe().map_err(anyhow::Error::from).and_then(|exe| {
+            #[cfg(target_os = "macos")]
+            if let Some(app) = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")) {
+                std::process::Command::new("open").arg("-n").arg(app).args(["--args", NEW_WINDOW_FLAG]).spawn()?;
+                return Ok(());
+            }
+            std::process::Command::new(exe).arg(NEW_WINDOW_FLAG).spawn()?;
+            Ok(())
+        });
+        if let Err(e) = result {
+            self.toasts.error(format!("Couldn't open a new window: {e}"));
         }
     }
 
@@ -203,6 +226,9 @@ impl StrataApp {
     }
 
     fn remember_open(&mut self) {
+        if !self.primary {
+            return;
+        }
         // Only saved connections are reopened at launch.
         self.settings.open_workspaces = self.workspaces.iter().map(|w| w.id()).filter(|id| self.conns.connections.iter().any(|c| c.id == *id)).collect();
         let _ = self.store.save_settings(&self.settings);
@@ -369,6 +395,7 @@ impl StrataApp {
             .frame(egui::Frame::new().fill(p().window).inner_margin(egui::Margin { left: if cfg!(target_os = "macos") { 88 } else { 12 }, right: 12, top: 2, bottom: 2 }))
             .show(ui, |ui| { egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    if ui.button("New window  Ctrl+Shift+N").clicked() { self.open_new_window(); ui.close(); }
                     if ui.button("New connection…").clicked() { self.home.begin_connection(); ui.close(); }
                     if ui.button("Open SQLite database…").clicked() { actions.push(HomeAction::OpenSqliteFile); ui.close(); }
                     if ui.button("New SQLite database…").clicked() {
@@ -615,6 +642,10 @@ impl eframe::App for StrataApp {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
             self.settings_open = !self.settings_open;
         }
+        // macOS takes ⌘⇧N through the native File menu.
+        if cfg!(not(target_os = "macos")) && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::N)) {
+            self.open_new_window();
+        }
 
         if self.active.is_none() {
             #[cfg(not(target_os = "macos"))]
@@ -711,6 +742,9 @@ impl eframe::App for StrataApp {
         if self.updates.show(&ctx, &mut self.settings, &mut self.toasts) {
             let _ = self.store.save_settings(&self.settings);
         }
+        if std::mem::take(&mut self.updates.restart) {
+            self.request_quit(&ctx);
+        }
         self.toasts.show(&ctx);
     }
 
@@ -725,12 +759,13 @@ impl StrataApp {
         for action in crate::macos_menu::NativeMenu::take_actions() {
             match action.as_str() {
                 "quit" => self.request_quit(ctx),
+                "new_window" => self.open_new_window(),
                 "new_connection" => { self.active = None; self.home.begin_connection(); }
                 "connections" => self.active = None,
                 "settings" => self.settings_open = !self.settings_open,
                 "about" => self.updates.about_open = true,
                 "check_updates" => { self.updates.about_open = true; self.updates.check(ctx, true); }
-                "shortcuts" => self.toasts.info("⌘T New query · ⌘K Find · ⌘↩ Run · ⌘⇧↩ Run all"),
+                "shortcuts" => self.toasts.info("⌘T New query · ⌘P Find · ⌘K Switch database · ⌘↩ Run · ⌘⇧↩ Run all"),
                 "open_sqlite" => { self.active = None; self.handle_home(HomeAction::OpenSqliteFile, ctx); }
                 "import_connections" => { self.active = None; self.handle_home(HomeAction::ImportConnections, ctx); }
                 "export_connections" => { self.active = None; self.handle_home(HomeAction::ExportConnections, ctx); }

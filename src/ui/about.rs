@@ -4,8 +4,10 @@
 use super::{dim, faint, p, primary_button, secondary_button};
 use crate::model::Settings;
 use crate::runtime::Task;
-use crate::update::{self, Release};
+use crate::update::{self, Progress, Release};
 use egui::RichText;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 #[derive(Default)]
 enum Status {
@@ -25,6 +27,10 @@ pub struct Updates {
     /// Asked for from a menu: report "up to date" and errors, and ignore a skipped version.
     manual: bool,
     popup: Option<Release>,
+    install: Option<(Task<Result<(), String>>, Arc<Progress>)>,
+    install_error: Option<String>,
+    /// Set once the update is staged; the app quits and the helper relaunches the new version.
+    pub restart: bool,
 }
 
 impl Updates {
@@ -64,6 +70,13 @@ impl Updates {
                 }
             };
         }
+        if let Some(result) = self.install.as_mut().and_then(|(task, _)| task.poll()) {
+            self.install = None;
+            match result {
+                Ok(()) => self.restart = true,
+                Err(e) => self.install_error = Some(e),
+            }
+        }
         if self.about_open {
             changed |= self.about(ctx, settings);
         }
@@ -77,6 +90,7 @@ impl Updates {
         let pal = p();
         let mut changed = false;
         let mut check = false;
+        let mut open_popup = None;
         self.about_open = super::dialogs::modal_window(ctx, "About Strata", 420.0, |ui| {
             ui.vertical_centered(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(72.0, 72.0), egui::Sense::hover());
@@ -100,8 +114,8 @@ impl Updates {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Status::Available(r) = &self.status {
-                            if primary_button(ui, "Download").clicked() {
-                                ui.ctx().open_url(egui::OpenUrl::new_tab(&r.url));
+                            if primary_button(ui, "Update").clicked() {
+                                open_popup = Some(r.clone());
                             }
                         } else if ui.add_enabled(!matches!(self.status, Status::Checking), egui::Button::new("Check for Updates")).clicked() {
                             check = true;
@@ -125,12 +139,34 @@ impl Updates {
         if check {
             self.check(ctx, true);
         }
+        if let Some(release) = open_popup {
+            self.about_open = false;
+            self.popup = Some(release);
+        }
         changed
+    }
+
+    /// Downloads and stages the update in place, or opens the release page for copies that can't
+    /// replace themselves (the portable Windows zip, development builds).
+    fn start_install(&mut self, ctx: &egui::Context, release: &Release) {
+        if update::install_target().is_none() || release.asset.is_none() {
+            ctx.open_url(egui::OpenUrl::new_tab(&release.url));
+            self.popup = None;
+            return;
+        }
+        let progress = Arc::new(Progress::default());
+        let (release, shared, repaint) = (release.clone(), progress.clone(), ctx.clone());
+        self.install_error = None;
+        self.install = Some((
+            Task::spawn(ctx, async move { update::install(release, shared, move || repaint.request_repaint()).await.map_err(|e| format!("{e:#}")) }),
+            progress,
+        ));
     }
 
     fn update_popup(&mut self, ctx: &egui::Context, release: &Release, settings: &mut Settings) -> bool {
         let mut changed = false;
         let mut close = false;
+        let mut install = false;
         let open = super::dialogs::modal_window(ctx, "Update available", 460.0, |ui| {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::hover());
@@ -149,6 +185,26 @@ impl Updates {
                 });
             }
             ui.add_space(12.0);
+            if let Some((_, progress)) = &self.install {
+                let (done, total) = (progress.done.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed));
+                let mb = |b: u64| b as f64 / 1_048_576.0;
+                let fraction = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+                ui.add(egui::ProgressBar::new(fraction.min(1.0)).desired_height(6.0));
+                ui.add_space(4.0);
+                let text = if total > 0 && done >= total {
+                    "Installing… Strata will restart".to_owned()
+                } else if total > 0 {
+                    format!("Downloading… {:.1} of {:.1} MB", mb(done), mb(total))
+                } else {
+                    format!("Downloading… {:.1} MB", mb(done))
+                };
+                ui.label(dim(text));
+                return;
+            }
+            if let Some(e) = &self.install_error {
+                ui.label(RichText::new(format!("Couldn't update: {e}")).color(p().danger)).on_hover_text(e);
+                ui.add_space(8.0);
+            }
             ui.horizontal(|ui| {
                 if secondary_button(ui, "Skip This Version").clicked() {
                     settings.skipped_update = release.version.clone();
@@ -156,9 +212,9 @@ impl Updates {
                     close = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if primary_button(ui, "Download").clicked() {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(&release.url));
-                        close = true;
+                    let label = if self.install_error.is_some() { "Retry" } else { "Update" };
+                    if primary_button(ui, label).clicked() {
+                        install = true;
                     }
                     if secondary_button(ui, "Later").clicked() {
                         close = true;
@@ -166,8 +222,13 @@ impl Updates {
                 });
             });
         });
-        if close || !open {
+        if install {
+            self.start_install(ctx, release);
+        }
+        // The popup stays up while the update downloads.
+        if (close || !open) && self.install.is_none() {
             self.popup = None;
+            self.install_error = None;
         }
         changed
     }

@@ -24,9 +24,17 @@ fn tls_connector(mode: SslMode) -> Result<MakeTlsConnector> {
 
 impl PgDriver {
     pub async fn connect(cfg: &ConnectionConfig) -> Result<Self> {
+        let mut cfg = cfg.clone();
         let tls = tls_connector(cfg.ssl)?;
-        let client = Self::open(cfg, &cfg.database, tls.clone()).await?;
-        Ok(Self { cfg: cfg.clone(), client, tls })
+        let client = match Self::open(&cfg, &cfg.database, tls.clone()).await {
+            // pg_hba refuses unencrypted logins on hosts such as Azure; libpq would have tried TLS first.
+            Err(e) if cfg.ssl == SslMode::Disable && format!("{e:#}").contains("no encryption") => {
+                cfg.ssl = SslMode::Require;
+                Self::open(&cfg, &cfg.database, tls.clone()).await?
+            }
+            other => other?,
+        };
+        Ok(Self { cfg, client, tls })
     }
 
     async fn open(cfg: &ConnectionConfig, db: &str, tls: MakeTlsConnector) -> Result<Client> {

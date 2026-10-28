@@ -21,6 +21,9 @@ impl NativeMenu {
         menu.append(&application)?;
 
         let file = Submenu::new("File", true);
+        let new_window = MenuItem::with_id("new_window", "New Window", true, Some(muda::accelerator::Accelerator::new(muda::accelerator::Modifiers::SUPER | muda::accelerator::Modifiers::SHIFT, muda::accelerator::Code::KeyN)));
+        items.push((new_window.id().clone(), "new_window".to_owned()));
+        file.append(&new_window)?;
         append_action(&file, &mut items, "new_connection", "New Connection…")?;
         append_action(&file, &mut items, "new_query", "New Query")?;
         append_action(&file, &mut items, "open_sqlite", "Open SQLite Database…")?;

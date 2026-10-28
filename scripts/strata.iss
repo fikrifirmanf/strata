@@ -57,6 +57,8 @@ Name: "{autodesktop}\Strata"; Filename: "{app}\strata.exe"; Tasks: desktopicon; 
 
 [Run]
 Filename: "{app}\strata.exe"; Description: "{cm:LaunchProgram,Strata}"; Flags: nowait postinstall skipifsilent
+; In-app updates run the installer with /SILENT; start the new version when it finishes.
+Filename: "{app}\strata.exe"; Flags: nowait runasoriginaluser skipifnotsilent
 
 ; Connections and settings in %APPDATA%\Strata and passwords in Credential Manager are kept on
 ; uninstall, so reinstalling or upgrading loses nothing.

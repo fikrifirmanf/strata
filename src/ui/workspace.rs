@@ -58,6 +58,7 @@ pub struct Shared<'a> {
 pub enum AppRequest {
     About,
     CheckForUpdates,
+    NewWindow,
 }
 
 pub struct TabCtx<'a> {
@@ -569,7 +570,7 @@ impl Workspace {
                 let version = self.session.as_ref().and_then(|session| session.server_version.clone()).unwrap_or_else(|| "Version unavailable".into());
                 self.handle(WsAction::QuickLookText { title: "Connection information".into(), text: format!("{}\n{}\nDatabase: {}\nSchema: {}\nServer: {}", self.cfg.display_name(), self.cfg.driver.label(), self.current_db, self.schema, version) }, sh, ctx);
             }
-            "shortcuts" => self.handle(WsAction::QuickLookText { title: "Keyboard shortcuts".into(), text: "⌘T  New query\n⌘K  Find tables and commands\n⌘Enter  Run statement\n⌘Shift+Enter  Run all\n⌘S  Review changes or save query\n⌘R  Reload table\nSpace  Quick Look".into() }, sh, ctx),
+            "shortcuts" => self.handle(WsAction::QuickLookText { title: "Keyboard shortcuts".into(), text: "⌘T  New query\n⌘P  Find tables and commands\n⌘K  Switch database\n⌘Enter  Run statement\n⌘Shift+Enter  Run all\n⌘S  Review changes or save query\n⌘R  Reload table\nSpace  Quick Look".into() }, sh, ctx),
             _ => {}
         }
     }
@@ -1263,6 +1264,7 @@ impl Workspace {
             .show(ui, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
                     ui.menu_button("File", |ui| {
+                        if ui.button("New window  Ctrl+Shift+N").clicked() { *sh.app_request = Some(AppRequest::NewWindow); ui.close(); }
                         if ui.button("New connection…").clicked() { *sh.show_home = true; ui.close(); }
                         if ui.button("New query  ⌘T").clicked() { actions.push(WsAction::OpenQuery { sql: String::new(), title: None, run: false }); ui.close(); }
                         if ui.button("Import data…").clicked() { actions.push(WsAction::ShowModal(Box::new(Modal::import_csv(self.schema.clone(), sh.settings.csv_delimiter)))); ui.close(); }
@@ -1301,7 +1303,7 @@ impl Workspace {
                             let version = self.session.as_ref().and_then(|s| s.server_version.clone()).unwrap_or_else(|| "Version unavailable".into());
                             actions.push(WsAction::QuickLookText { title: "Connection information".into(), text: format!("{}\n{}\nDatabase: {}\nSchema: {}\nServer: {}", self.cfg.display_name(), self.cfg.driver.label(), self.current_db, self.schema, version) }); ui.close();
                         }
-                        if ui.button("Keyboard shortcuts").clicked() { actions.push(WsAction::QuickLookText { title: "Keyboard shortcuts".into(), text: "⌘T  New query\n⌘K  Find tables and commands\n⌘Enter  Run statement\n⌘Shift+Enter  Run all\n⌘S  Review changes or save query\n⌘R  Reload table\nSpace  Quick Look\nDouble-click a cell value to edit. Use the arrow to open a related row.".into() }); ui.close(); }
+                        if ui.button("Keyboard shortcuts").clicked() { actions.push(WsAction::QuickLookText { title: "Keyboard shortcuts".into(), text: "⌘T  New query\n⌘P  Find tables and commands\n⌘K  Switch database\n⌘Enter  Run statement\n⌘Shift+Enter  Run all\n⌘S  Review changes or save query\n⌘R  Reload table\nSpace  Quick Look\nDouble-click a cell value to edit. Use the arrow to open a related row.".into() }); ui.close(); }
                         ui.separator();
                         if ui.button("Check for updates…").clicked() { *sh.app_request = Some(AppRequest::CheckForUpdates); ui.close(); }
                         if ui.button("About Strata").clicked() { *sh.app_request = Some(AppRequest::About); ui.close(); }
@@ -1338,9 +1340,9 @@ impl Workspace {
                     let reserve = if compact { 156.0 } else { 380.0 };
                     let command_width = (ui.available_width() - reserve - 8.0).max(300.0);
                     egui::Frame::new().fill(p().sidebar).stroke(egui::Stroke::new(1.0, p().border))
-                        .corner_radius(egui::CornerRadius::same(24)).inner_margin(egui::Margin::symmetric(6, 4))
+                        .corner_radius(egui::CornerRadius::same(24)).inner_margin(egui::Margin { left: 6, right: 12, top: 4, bottom: 4 })
                         .show(ui, |ui| {
-                            ui.set_width(command_width - 14.0);
+                            ui.set_width(command_width - 20.0);
                             ui.horizontal(|ui| {
                                 if compact {
                                     self.location_ui(ui, actions);
@@ -1421,8 +1423,9 @@ impl Workspace {
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), "Jump to anything"));
         let painter = ui.painter_at(rect.shrink2(vec2(32.0, 0.0)));
         painter.text(egui::pos2(rect.left() + 32.0, rect.center().y), egui::Align2::LEFT_CENTER, "Jump to anything", egui::FontId::proportional(12.5), pal.text_dim);
-        ui.painter().text(egui::pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, "⌘K", egui::FontId::monospace(11.0), pal.text_faint);
-        if response.on_hover_text("Find tables, queries and commands (⌘K)").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        let shortcut = if cfg!(target_os = "macos") { "⌘P" } else { "Ctrl+P" };
+        ui.painter().text(egui::pos2(rect.right() - 14.0, rect.center().y), egui::Align2::RIGHT_CENTER, shortcut, egui::FontId::monospace(11.0), pal.text_faint);
+        if response.on_hover_text(format!("Find tables, queries and commands ({shortcut})")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             self.modal = Some(Modal::open_anything());
         }
     }
@@ -2153,7 +2156,7 @@ impl Workspace {
         if ctx.input_mut(|i| i.consume_key(cmd, Key::P)) {
             self.modal = Some(Modal::open_anything());
         }
-        if ctx.input_mut(|i| i.consume_key(cmd, Key::K)) && self.databases.len() > 1 {
+        if ctx.input_mut(|i| i.consume_key(cmd, Key::K)) && !self.databases.is_empty() {
             self.modal = Some(Modal::SwitchDatabase { query: String::new(), selected: 0 });
         }
         if ctx.input_mut(|i| i.consume_key(cmd_shift, Key::C)) {

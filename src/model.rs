@@ -402,7 +402,7 @@ impl ConnectionConfig {
             database: String::new(),
             path: String::new(),
             odbc_dsn: String::new(),
-            ssl: SslMode::Disable,
+            ssl: default_ssl(driver),
             ssh: SshConfig { port: 22, ..Default::default() },
             tag: Tag::None,
             color: None,
@@ -522,7 +522,7 @@ impl ConnectionConfig {
         let mut url = format!("{scheme}{ssh}://{auth}{}:{}/{}", self.host, self.port, self.database);
         let mut params = vec![format!("name={}", utf8_percent_encode(&self.display_name(), NON_ALPHANUMERIC))];
         if self.driver.is_odbc() { params.push(format!("dsn={}", utf8_percent_encode(&self.odbc_dsn, NON_ALPHANUMERIC))); }
-        if self.ssl != SslMode::Disable {
+        if self.ssl != default_ssl(self.driver) {
             params.push(format!("sslmode={}", match self.ssl {
                 SslMode::Prefer => "prefer",
                 SslMode::Require => "require",
@@ -589,6 +589,16 @@ impl ConnectionConfig {
             }
         }
         Ok(c)
+    }
+}
+
+/// Postgres-protocol servers start at libpq's own default, "prefer": TLS when the server offers it.
+/// Hosted servers such as Azure refuse unencrypted logins outright.
+fn default_ssl(driver: DriverKind) -> SslMode {
+    if matches!(driver, DriverKind::Postgres | DriverKind::CockroachDb | DriverKind::Redshift | DriverKind::Greenplum) {
+        SslMode::Prefer
+    } else {
+        SslMode::Disable
     }
 }
 
@@ -862,6 +872,25 @@ mod tests {
         assert_eq!(c.host, "db.example.com");
         assert_eq!(c.port, 5432);
         assert_eq!(c.database, "postgres");
+    }
+
+    #[test]
+    fn form_password_with_special_chars_round_trips_through_url() {
+        let mut c = ConnectionConfig::new(DriverKind::Postgres);
+        c.user = "Admin01".into();
+        c.password = "p#ss@w/rd?x%41".into();
+        let back = ConnectionConfig::from_url(&c.to_url(true)).unwrap();
+        assert_eq!(back.password, "p#ss@w/rd?x%41");
+        assert_eq!(back.user, "Admin01");
+    }
+
+    #[test]
+    fn postgres_defaults_to_prefer_ssl_and_keeps_explicit_disable() {
+        assert_eq!(ConnectionConfig::from_url("postgresql://u@db.example.com/app").unwrap().ssl, SslMode::Prefer);
+        assert_eq!(ConnectionConfig::from_url("mysql://u@db.example.com/app").unwrap().ssl, SslMode::Disable);
+        let mut c = ConnectionConfig::new(DriverKind::Postgres);
+        c.ssl = SslMode::Disable;
+        assert_eq!(ConnectionConfig::from_url(&c.to_url(false)).unwrap().ssl, SslMode::Disable);
     }
 
     #[test]
