@@ -22,7 +22,8 @@ main() {
     RELEASE=$(curl -fsSL -H 'Accept: application/vnd.github+json' \
         "https://api.github.com/repos/$REPO/releases/latest") \
         || fail 'Could not reach the GitHub releases API.'
-    URLS=$(printf '%s\n' "$RELEASE" | sed -n 's/.*"browser_download_url": *"\([^"]*\)".*/\1/p')
+    # The API may answer on a single line; split it so each URL lands on its own line.
+    URLS=$(printf '%s\n' "$RELEASE" | tr ',{}' '\n\n\n' | sed -n 's/.*"browser_download_url": *"\([^"]*\)".*/\1/p')
     DMG_URL=$(printf '%s\n' "$URLS" | grep -E '/Strata-[^/]*-macos-universal\.dmg$' | head -1 || true)
     SUMS_URL=$(printf '%s\n' "$URLS" | grep -E '/SHA256SUMS\.txt$' | head -1 || true)
     [ -n "$DMG_URL" ] || fail 'The latest release has no macOS DMG.'
