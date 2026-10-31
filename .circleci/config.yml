@@ -1,6 +1,10 @@
-# Strata CI/CD.
+# Strata CI/CD, fallback pipeline.
 #
-# Runs only for v* release tags: builds macOS (universal .dmg), Linux (.tar.gz) and Windows
+# The primary release pipeline is GitHub Actions (.github/workflows/release.yml). This workflow does
+# not run on tag pushes; GitHub Actions starts it through the CircleCI API (with the
+# `run-fallback` parameter) only when one of its jobs fails.
+#
+# Same job as the primary, for v* release tags: builds macOS (universal .dmg), Linux (.tar.gz) and Windows
 # (setup .exe installer plus a portable .zip), then publishes a GitHub release with those files
 # and a SHA256SUMS.txt attached. The macOS and Windows jobs run the test suite before packaging.
 #
@@ -17,6 +21,9 @@ orbs:
   win: circleci/windows@5.1
 
 parameters:
+  run-fallback:
+    type: boolean
+    default: false
   rust-version:
     type: string
     default: stable
@@ -204,6 +211,7 @@ jobs:
 
 workflows:
   ci:
+    when: << pipeline.parameters.run-fallback >>
     jobs:
       - build-linux:
           filters:
