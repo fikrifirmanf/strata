@@ -314,7 +314,12 @@ impl ManagedQuery {
         }
     }
 
+    #[cfg(test)]
     pub async fn execute(&self, sql: &str, timeout_secs: u64) -> Result<Vec<QueryResult>> {
+        self.execute_paged(sql, timeout_secs, 0).await
+    }
+
+    pub async fn execute_paged(&self, sql: &str, timeout_secs: u64, page_size: usize) -> Result<Vec<QueryResult>> {
         validate_for(sql, self.cfg.driver.dialect())?;
         anyhow::ensure!(
             supported(&self.cfg),
@@ -369,7 +374,7 @@ impl ManagedQuery {
             self.set_state(TransactionState::Active);
         }
         let result = if timeout_secs > 0 {
-            match tokio::time::timeout(Duration::from_secs(timeout_secs), driver.execute(sql)).await
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), driver.execute_paged(sql, page_size)).await
             {
                 Ok(result) => result,
                 Err(_) => {
@@ -378,7 +383,7 @@ impl ManagedQuery {
                 }
             }
         } else {
-            driver.execute(sql).await
+            driver.execute_paged(sql, page_size).await
         };
         if result.is_err() || self.cancelled.load(Ordering::SeqCst) {
             self.set_state(TransactionState::Failed);
@@ -387,6 +392,25 @@ impl ManagedQuery {
             anyhow::bail!("Query cancelled; use Rollback before continuing");
         }
         result
+    }
+
+    pub async fn fetch_page(&self, cursor: i32, page_size: usize, timeout_secs: u64) -> Result<QueryResult> {
+        let connection = self.connection.lock().await;
+        anyhow::ensure!(self.state() == TransactionState::Active, "This result is closed; run the query again");
+        let session = connection.session.as_ref().context("The query connection is closed")?;
+        let mut driver = session.driver.lock().await;
+        let result = if timeout_secs > 0 {
+            tokio::time::timeout(Duration::from_secs(timeout_secs), driver.fetch_page(cursor, page_size))
+                .await.context("Loading more rows timed out; use Rollback before continuing").and_then(|result| result)
+        } else { driver.fetch_page(cursor, page_size).await };
+        if result.is_err() { self.set_state(TransactionState::Failed); }
+        result
+    }
+
+    pub async fn close_cursor(&self, cursor: i32) -> Result<()> {
+        let connection = self.connection.lock().await;
+        if let Some(session) = &connection.session { session.driver.lock().await.close_cursor(cursor).await?; }
+        Ok(())
     }
 
     pub async fn finish(&self, commit: bool) -> Result<()> {
@@ -407,6 +431,8 @@ impl ManagedQuery {
         self.set_state(TransactionState::Unknown);
         let result = {
             let mut driver = session.driver.lock().await;
+            tokio::time::timeout(Duration::from_secs(10), driver.close_cursor(-1)).await
+                .context("Closing result cursors timed out; use Rollback before continuing")??;
             match tokio::time::timeout(Duration::from_secs(10), driver.execute(sql)).await {
                 Ok(result) => result.map(|_| ()),
                 Err(_) => Err(anyhow::anyhow!(

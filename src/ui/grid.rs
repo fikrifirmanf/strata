@@ -171,6 +171,7 @@ pub struct GridState {
     editing: Option<(usize, usize, String, bool)>,
     focused: bool,
     pub hidden: BTreeSet<usize>,
+    pub near_end: bool,
     scroll_to: Option<usize>,
     /// The gliding cursor ring: the cell it last sat on, and the offset it is travelling from.
     ring_cell: Option<(usize, usize)>,
@@ -304,6 +305,7 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
         ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::NONE;
         // Cells butt against each other so header fill, rules and selection run unbroken; text carries its own inset.
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        let max_scroll_height = (ui.available_height() - 40.0 - ui.spacing().scroll.bar_width - 8.0).max(0.0);
         let mut table = TableBuilder::new(ui)
             .id_salt(opt.id)
             .striped(false)
@@ -311,6 +313,8 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
             .sense(Sense::click())
             .auto_shrink([false, false])
             .min_scrolled_height(0.0)
+            .max_scroll_height(max_scroll_height)
+            .stick_to_bottom(false)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
         if let Some(r) = st.scroll_to.take() {
             table = table.scroll_to_row(r, None);
@@ -335,7 +339,7 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
             };
         }
 
-        table
+        let scroll = table
             .header(40.0, |mut header| {
                 for (vi, &c) in visible.iter().enumerate() {
                     let meta = &cols[c];
@@ -504,6 +508,7 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
                     }
                 });
             });
+        st.near_end = scroll.content_size.y - scroll.state.clamped_offset().y - scroll.inner_rect.height() <= row_h * 8.0;
     });
 
     paint_cursor_ring(ui, st, cursor_rect, body_clip);

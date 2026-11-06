@@ -96,6 +96,7 @@ pub enum WsAction {
     QuickLookText { title: String, text: String },
     RecordHistory { sql: String, elapsed_ms: u64, ok: bool },
     RefreshObjects,
+    LoadCompletionCatalog(String),
     SwitchDatabase(String),
     SwitchSchema(String),
     ToggleRowDetail,
@@ -204,6 +205,7 @@ pub struct Workspace {
     objects_task: Option<Task<anyhow::Result<Vec<DbObject>>>>,
     definition_task: Option<Task<anyhow::Result<(DbObject, String)>>>,
     columns_task: Option<Task<anyhow::Result<Vec<(String, String)>>>>,
+    completion_task: Option<(String, Task<anyhow::Result<QueryResult>>)>,
     script_task: Option<(String, bool, Task<anyhow::Result<()>>)>,
     kill_task: Option<Task<anyhow::Result<()>>>,
     ping_task: Option<Task<anyhow::Result<u64>>>,
@@ -266,6 +268,7 @@ impl Workspace {
             objects_task: None,
             definition_task: None,
             columns_task: None,
+            completion_task: None,
             script_task: None,
             kill_task: None,
             ping_task: None,
@@ -317,6 +320,8 @@ impl Workspace {
         self.status = ConnState::Connecting;
         self.connect_error = None;
         self.context_ready = false;
+        self.completion_task = None;
+        self.catalog = Catalog::default();
         self.connecting = Some(Task::spawn(ctx, async move { Session::open(cfg).await }));
     }
 
@@ -338,6 +343,8 @@ impl Workspace {
     fn load_init(&mut self, ctx: &egui::Context, switch_to: Option<String>) {
         let Some(s) = &self.session else { return };
         self.context_ready = false;
+        self.completion_task = None;
+        self.catalog = Catalog::default();
         let wanted_schema = self.schema.clone();
         self.init_task = Some(s.spawn(ctx, move |d| async move {
             let mut d = d.lock().await;
@@ -371,7 +378,20 @@ impl Workspace {
     }
 
     fn set_objects(&mut self, objects: Vec<DbObject>, ctx: &egui::Context) {
+        if self.cfg.driver.dialect() == Dialect::SqlServer {
+            self.catalog.databases = self.databases.clone();
+            if !self.current_db.is_empty() && !self.catalog.databases.iter().any(|name| name.eq_ignore_ascii_case(&self.current_db)) {
+                self.catalog.databases.push(self.current_db.clone());
+            }
+            self.catalog.current_database = self.current_db.clone();
+            self.catalog.schemas = self.schemas.clone();
+            self.catalog.schema = self.schema.clone();
+            self.catalog.namespaces.clear();
+            self.catalog.failed_databases.clear();
+            self.completion_task = None;
+        }
         self.catalog.tables = objects.iter().filter(|o| o.kind.has_rows()).map(|o| o.name.clone()).collect();
+        self.catalog.columns.clear();
         self.objects = objects;
         self.load_catalog_columns(ctx);
         if let Some(s) = &self.session {
@@ -437,6 +457,18 @@ impl Workspace {
             self.catalog.columns.clear();
             for (t, c) in pairs {
                 self.catalog.columns.entry(t).or_default().push(c);
+            }
+        }
+        if let Some((_, task)) = &mut self.completion_task {
+            if let Some(result) = task.poll() {
+                let (database, _) = self.completion_task.take().expect("completion task present");
+                match result {
+                    Ok(rows) => self.catalog.cache_database(&database, &rows),
+                    Err(error) => {
+                        self.catalog.failed_databases.insert(database.to_lowercase());
+                        sh.toasts.error(format!("Cannot load suggestions for {database}: {error:#}"));
+                    }
+                }
             }
         }
         if let Some((_, _, task)) = &mut self.script_task {
@@ -955,6 +987,15 @@ impl Workspace {
                 if refresh { self.load_objects(ctx); }
             }
             WsAction::RefreshObjects => self.load_objects(ctx),
+            WsAction::LoadCompletionCatalog(database) => {
+                if !self.context_ready || self.completion_task.is_some() || self.cfg.driver.dialect() != Dialect::SqlServer { return; }
+                let Some(database) = self.databases.iter().find(|name| name.eq_ignore_ascii_case(&database))
+                    .or_else(|| self.current_db.eq_ignore_ascii_case(&database).then_some(&self.current_db)).cloned() else { return };
+                if self.catalog.namespaces.contains_key(&vec![database.to_lowercase()]) || self.catalog.failed_databases.contains(&database.to_lowercase()) { return; }
+                let Some(session) = &self.session else { return };
+                let sql = meta::sqlserver_completion_sql(&database);
+                self.completion_task = Some((database, session.spawn(ctx, move |driver| async move { driver.lock().await.query_one(&sql).await })));
+            }
             WsAction::SwitchDatabase(db) => {
                 if self.defer_transaction_action(TransactionAction::Database(db.clone())) { return; }
                 self.reset_query_connections();
@@ -2440,6 +2481,67 @@ fn columns_shown_id(conn: uuid::Uuid, obj: &DbObject) -> egui::Id {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CompletionDriver(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[async_trait::async_trait]
+    impl Driver for CompletionDriver {
+        fn kind(&self) -> DriverKind { DriverKind::SqlServer }
+        fn current_database(&self) -> String { "ATMBersama".into() }
+        async fn switch_database(&mut self, _: &str) -> anyhow::Result<()> { panic!("completion must not switch databases") }
+        async fn execute(&mut self, sql: &str) -> anyhow::Result<Vec<QueryResult>> {
+            self.0.lock().unwrap().push(sql.to_string());
+            assert!(sql.starts_with("SELECT s.name, o.name, c.name FROM "));
+            if sql.contains("[DeniedDb]") { anyhow::bail!("database access denied"); }
+            Ok(vec![QueryResult { rows: vec![vec![Some("dbo".into()), Some("AJ_123".into()), Some("id".into())]], ..Default::default() }])
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_metadata_is_cached_and_never_switches_database_or_retries_denials() {
+        let ctx = egui::Context::default();
+        let mut cfg = ConnectionConfig::new(DriverKind::Sqlite); cfg.path = ":memory:".into();
+        let mut workspace = Workspace::open(cfg.clone(), &ctx);
+        workspace.connecting = None;
+        let mut session = Session::open(cfg).await.unwrap();
+        let queries = Arc::new(std::sync::Mutex::new(Vec::new()));
+        session.driver = Arc::new(tokio::sync::Mutex::new(Box::new(CompletionDriver(queries.clone()))));
+        session.cfg.driver = DriverKind::SqlServer;
+        workspace.session = Some(Arc::new(session));
+        workspace.cfg.driver = DriverKind::SqlServer;
+        workspace.context_ready = true;
+        workspace.current_db = "ATMBersama".into();
+        workspace.schema = "dbo".into();
+        workspace.databases = vec!["ATMBersama".into(), "OtherDb".into(), "DeniedDb".into()];
+        workspace.latency_ms = Some(0);
+        let store = Store::for_test(std::env::temp_dir().join(format!("strata-completion-{}", uuid::Uuid::new_v4())));
+        let settings = Settings::default();
+        let mut toasts = Toasts::default();
+        let mut sh = Shared {
+            store: &store, settings: &settings, queries: &mut Vec::new(), boards: &mut Vec::new(), toasts: &mut toasts,
+            edit_connection: &mut None, workspace_choices: &[], switch_workspace: &mut None, show_home: &mut false,
+            open_settings: &mut false, workspace_command: &mut None, create_connection: &mut None, app_request: &mut None,
+        };
+        workspace.handle(WsAction::LoadCompletionCatalog("UnknownDb".into()), &mut sh, &ctx);
+        assert!(workspace.completion_task.is_none(), "only known database names may be queried");
+        for database in ["OtherDb", "DeniedDb"] {
+            workspace.handle(WsAction::LoadCompletionCatalog(database.into()), &mut sh, &ctx);
+            workspace.handle(WsAction::LoadCompletionCatalog(database.into()), &mut sh, &ctx);
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while workspace.completion_task.is_some() && Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                workspace.poll(&ctx, &mut sh);
+            }
+            assert!(workspace.completion_task.is_none(), "metadata task must finish");
+            workspace.handle(WsAction::LoadCompletionCatalog(database.into()), &mut sh, &ctx);
+            assert!(workspace.completion_task.is_none(), "cached success or failure must not query again on idle frames");
+        }
+        assert_eq!(queries.lock().unwrap().len(), 2);
+        assert!(workspace.catalog.namespaces.contains_key(&vec!["otherdb".into(), "dbo".into(), "aj_123".into()]));
+        assert!(workspace.catalog.failed_databases.contains("denieddb"));
+        assert_eq!(workspace.current_db, "ATMBersama");
+        assert_eq!(workspace.schema, "dbo");
+    }
 
     #[test]
     fn short_type_shortens_long_postgres_spellings_and_keeps_others() {
