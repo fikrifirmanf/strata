@@ -2,12 +2,12 @@
 
 use crate::model::*;
 use crate::store::{ConnectionExport, ConnectionFile, Store};
-use crate::theme::{mix, rgb, Palette};
+use crate::theme::{rgb, Palette};
 use crate::ui::home::{Home, HomeAction};
 use crate::ui::settings::{SettingsEvent, SettingsUi};
 use crate::ui::workspace::{Shared, Workspace};
 use crate::ui::*;
-use egui::{vec2, RichText, Stroke};
+use egui::{vec2, RichText};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -35,6 +35,8 @@ pub struct StrataApp {
     passcode_error: bool,
     last_activity: Instant,
     pending_open: Vec<ConnectionConfig>,
+    /// The saved connection whose passwords the open editor already holds.
+    editor_secrets: Option<Uuid>,
     run_on_open: Option<String>,
     /// Decided at launch: the window was created transparent and the OS blurs behind it.
     translucent: bool,
@@ -96,6 +98,7 @@ impl StrataApp {
             passcode_error: false,
             last_activity: Instant::now(),
             pending_open,
+            editor_secrets: None,
             run_on_open,
             translucent,
             screenshot_to: std::env::var("STRATA_SCREENSHOT").ok().filter(|p| !p.is_empty()),
@@ -147,6 +150,11 @@ impl StrataApp {
     fn handle_app_request(&mut self, request: Option<workspace::AppRequest>, ctx: &egui::Context) {
         match request {
             Some(workspace::AppRequest::About) => self.updates.about_open = true,
+            Some(workspace::AppRequest::ToggleTheme) => {
+                self.settings.theme = if p().dark { ThemeChoice::Light } else { ThemeChoice::Dark };
+                self.applied_theme = None;
+                let _ = self.store.save_settings(&self.settings);
+            }
             Some(workspace::AppRequest::CheckForUpdates) => {
                 self.updates.about_open = true;
                 self.updates.check(ctx, true);
@@ -181,11 +189,32 @@ impl StrataApp {
         }
     }
 
-    fn open_connection(&mut self, cfg: ConnectionConfig, ctx: &egui::Context) {
+    /// Loads a saved connection's passwords into `self.conns` (the keychain is read once per
+    /// run, and only here, so launching the app never asks for keychain access).
+    fn load_secrets(&mut self, id: Uuid) {
+        if let Some(c) = self.conns.connections.iter_mut().find(|c| c.id == id) {
+            self.store.fill_secrets(c);
+        }
+    }
+
+    /// Copies the loaded passwords of saved connection `cfg.id` into the empty fields of `cfg`.
+    fn with_secrets(&mut self, cfg: &mut ConnectionConfig) {
+        self.load_secrets(cfg.id);
+        if let Some(c) = self.conns.connections.iter().find(|c| c.id == cfg.id) {
+            for (to, from) in [(&mut cfg.password, &c.password), (&mut cfg.ssh.password, &c.ssh.password), (&mut cfg.ssh.key_passphrase, &c.ssh.key_passphrase)] {
+                if to.is_empty() {
+                    *to = from.clone();
+                }
+            }
+        }
+    }
+
+    fn open_connection(&mut self, mut cfg: ConnectionConfig, ctx: &egui::Context) {
         if let Some(i) = self.workspaces.iter().position(|w| w.id() == cfg.id) {
             self.active = Some(i);
             return;
         }
+        self.with_secrets(&mut cfg);
         if let Some(c) = self.conns.connections.iter_mut().find(|c| c.id == cfg.id) {
             c.last_used = Some(chrono::Utc::now());
             let _ = self.store.save_connections(&self.conns);
@@ -239,14 +268,6 @@ impl StrataApp {
             HomeAction::Open(id) => {
                 if let Some(cfg) = self.conns.connections.iter().find(|c| c.id == id).cloned() {
                     self.open_connection(cfg, ctx);
-                }
-            }
-            HomeAction::OpenWithQuery(id, sql) => {
-                if let Some(cfg) = self.conns.connections.iter().find(|c| c.id == id).cloned() {
-                    self.open_connection(cfg, ctx);
-                    if let Some(i) = self.active {
-                        self.workspaces[i].open_after_connect(sql, ctx);
-                    }
                 }
             }
             HomeAction::ConnectUrl(cfg) => {
@@ -312,6 +333,7 @@ impl StrataApp {
                 }
             }
             HomeAction::Duplicate(id) => {
+                self.load_secrets(id);
                 if let Some(mut c) = self.conns.connections.iter().find(|c| c.id == id).cloned() {
                     c.id = Uuid::new_v4();
                     c.name = format!("{} copy", c.display_name());
@@ -377,6 +399,12 @@ impl StrataApp {
                     }
                 }
             }
+            HomeAction::OpenSettings => self.settings_open = true,
+            HomeAction::ToggleTheme => {
+                self.settings.theme = if p().dark { ThemeChoice::Light } else { ThemeChoice::Dark };
+                self.applied_theme = None;
+                let _ = self.store.save_settings(&self.settings);
+            }
             HomeAction::OpenSqliteFile => {
                 if let Some(path) = rfd::FileDialog::new().add_filter("SQLite", &["sqlite", "sqlite3", "db", "db3"]).pick_file() {
                     let mut c = ConnectionConfig::new(DriverKind::Sqlite);
@@ -422,97 +450,6 @@ impl StrataApp {
         for action in actions { self.handle_home(action, &ctx); }
     }
 
-    fn rail(&mut self, ui: &mut egui::Ui) {
-        let pal = p();
-        let ctx = ui.ctx().clone();
-        let top_inset = if cfg!(target_os = "macos") { 30 } else { 0 };
-        egui::Panel::left("rail").exact_size(76.0).resizable(false).show_separator_line(false).frame(egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 0, top: 12 + top_inset, bottom: 12 })).show(ui, |ui| {
-            glass_frame().inner_margin(egui::Margin::symmetric(0, 12)).show(ui, |ui| {
-                ui.set_min_size(ui.available_size());
-                ui.vertical_centered(|ui| {
-                    let (r, resp) = ui.allocate_exact_size(vec2(36.0, 36.0), egui::Sense::click());
-                    home::paint_logo(ui.painter(), r);
-                    if resp.on_hover_text("Launchpad").clicked() {
-                        self.home.refresh_activity();
-                        self.active = None;
-                    }
-                    ui.add_space(10.0);
-                    let home_active = self.active.is_none();
-                    if rail_button(ui, Icon::Home, "Launchpad", home_active).clicked() {
-                        self.home.refresh_activity();
-                        self.active = None;
-                    }
-                    ui.add_space(6.0);
-                    let sep = ui.cursor().top();
-                    ui.painter().hline(ui.max_rect().center().x - 14.0..=ui.max_rect().center().x + 14.0, sep, Stroke::new(1.0, pal.glass_stroke));
-                    ui.add_space(8.0);
-                    let mut close = None;
-                    for (i, ws) in self.workspaces.iter().enumerate() {
-                        let active = self.active == Some(i);
-                        let (r, resp) = ui.allocate_exact_size(vec2(64.0, 48.0), egui::Sense::click());
-                        let tile = egui::Rect::from_center_size(r.center(), vec2(40.0, 40.0));
-                        let env = rgb(ws.cfg.accent());
-                        let initials: String = ws.cfg.display_name().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).take(2).filter_map(|w| w.chars().next()).collect::<String>().to_uppercase();
-                        let initials = if initials.is_empty() { ws.cfg.driver.badge().to_string() } else { initials };
-                        let fill = if active { mix(pal.surface, env, 0.16) } else if resp.hovered() { pal.surface_hover } else { pal.surface };
-                        ui.painter().rect_filled(tile, egui::CornerRadius::same(13), fill);
-                        ui.painter().rect_stroke(tile, egui::CornerRadius::same(13), Stroke::new(if active { 2.0 } else { 1.0 }, if active { env } else { pal.glass_stroke }), egui::StrokeKind::Inside);
-                        ui.painter().text(tile.center(), egui::Align2::CENTER_CENTER, initials, semibold(12.5), readable_on_tint(env));
-                        let dot = match ws.status {
-                            workspace::ConnState::Connected => pal.success,
-                            workspace::ConnState::Connecting => pal.warning,
-                            _ => pal.danger,
-                        };
-                        ui.painter().circle(tile.right_bottom() - vec2(2.0, 2.0), 4.5, dot, Stroke::new(2.0, pal.glass_opaque()));
-                        let resp = resp.on_hover_text(format!("{}\n{}", ws.cfg.display_name(), ws.cfg.subtitle()));
-                        if resp.clicked() {
-                            self.active = Some(i);
-                        }
-                        if resp.middle_clicked() {
-                            close = Some(i);
-                        }
-                        resp.context_menu(|ui| {
-                            if ui.button("Reconnect").clicked() {
-                                ui.close();
-                                close = Some(usize::MAX - i);
-                            }
-                            if ui.button("Close workspace").clicked() {
-                                close = Some(i);
-                                ui.close();
-                            }
-                        });
-                    }
-                    if let Some(i) = close {
-                        if i > self.workspaces.len() {
-                            let idx = usize::MAX - i;
-                            self.workspaces[idx].reconnect(&ctx);
-                            self.active = Some(idx);
-                        } else {
-                            self.close_workspace(i);
-                        }
-                    }
-                    let (r, resp) = ui.allocate_exact_size(vec2(64.0, 46.0), egui::Sense::click());
-                    let tile = egui::Rect::from_center_size(r.center(), vec2(40.0, 40.0));
-                    let dash = if resp.hovered() { pal.text_dim } else { pal.border };
-                    ui.painter().add(egui::Shape::dashed_line(&[tile.left_top() + vec2(12.0, 0.0), tile.right_top() - vec2(12.0, 0.0)], Stroke::new(1.0, dash), 3.0, 3.0));
-                    ui.painter().rect_stroke(tile, egui::CornerRadius::same(13), Stroke::new(1.0, dash), egui::StrokeKind::Inside);
-                    paint_icon(ui.painter(), egui::Rect::from_center_size(tile.center(), vec2(15.0, 15.0)), Icon::Plus, if resp.hovered() { pal.text } else { pal.text_dim });
-                    if resp.on_hover_text("Open another connection").clicked() {
-                        self.active = None;
-                    }
-                    ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                        if rail_button(ui, Icon::Gear, "Settings (⌘,)", self.settings_open).clicked() {
-                            self.settings_open = !self.settings_open;
-                        }
-                        if self.settings.passcode_hash.is_some() && rail_button(ui, Icon::Lock, "Lock (⌘L)", false).clicked() {
-                            self.locked = true;
-                        }
-                    });
-                });
-            });
-        });
-    }
-
     fn lock_screen(&mut self, ui: &mut egui::Ui) {
         let pal = p();
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
@@ -544,20 +481,6 @@ impl StrataApp {
             });
         });
     }
-}
-
-fn rail_button(ui: &mut egui::Ui, icon: Icon, tip: &str, active: bool) -> egui::Response {
-    let pal = p();
-    let (r, resp) = ui.allocate_exact_size(vec2(64.0, 44.0), egui::Sense::click());
-    let tile = egui::Rect::from_center_size(r.center(), vec2(40.0, 40.0));
-    if active || resp.hovered() {
-        ui.painter().rect_filled(tile, egui::CornerRadius::same(12), if active { mix(pal.surface, pal.accent, 0.16) } else { pal.surface_hover });
-    }
-    if active {
-        ui.painter().rect_stroke(tile, egui::CornerRadius::same(12), Stroke::new(1.0, pal.accent.gamma_multiply(0.45)), egui::StrokeKind::Inside);
-    }
-    paint_icon(ui.painter(), egui::Rect::from_center_size(r.center(), vec2(19.0, 19.0)), icon, if active { pal.accent } else { pal.text_dim });
-    resp.on_hover_text(tip)
 }
 
 /// Turns on the platform's behind-window blur: vibrancy on macOS, acrylic on Windows.
@@ -612,10 +535,20 @@ impl eframe::App for StrataApp {
         self.apply_theme(&ctx);
         set_ground_opacity(if self.translucent { 1.0 - self.settings.window_translucency.clamp(0.0, 0.9) } else { 1.0 });
         paint_ground(&ctx);
-        for cfg in std::mem::take(&mut self.pending_open) {
-            self.open_connection(cfg, &ctx);
-            if let (Some(sql), Some(i)) = (self.run_on_open.take(), self.active) {
-                self.workspaces[i].run_after_connect = Some(sql);
+        // Reopening reads the keychain, which can block on a macOS prompt. Wait until the window
+        // has been drawn so it is on screen behind the prompt, then bring it forward again:
+        // the prompt takes focus and the window would otherwise stay behind other apps.
+        if !self.pending_open.is_empty() {
+            if ctx.cumulative_frame_nr() < 2 {
+                ctx.request_repaint();
+            } else {
+                for cfg in std::mem::take(&mut self.pending_open) {
+                    self.open_connection(cfg, &ctx);
+                    if let (Some(sql), Some(i)) = (self.run_on_open.take(), self.active) {
+                        self.workspaces[i].run_after_connect = Some(sql);
+                    }
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
         }
 
@@ -652,7 +585,6 @@ impl eframe::App for StrataApp {
             self.home_menu_bar(ui);
             #[cfg(target_os = "macos")]
             if self.native_menu.is_none() { self.home_menu_bar(ui); }
-            self.rail(ui);
         }
 
         let mut edit_request: Option<Uuid> = None;
@@ -662,7 +594,7 @@ impl eframe::App for StrataApp {
         let mut app_request = None;
         let mut show_home = false;
         let workspace_choices: Vec<workspace::WorkspaceChoice> = self.workspaces.iter().map(|ws| workspace::WorkspaceChoice {
-            id: ws.id(), name: ws.cfg.display_name(), color: rgb(ws.cfg.accent()),
+            id: ws.id(), name: ws.cfg.display_name(),
         }).collect();
         match self.active {
             Some(i) if i < self.workspaces.len() => {
@@ -681,7 +613,25 @@ impl eframe::App for StrataApp {
             _ => {
                 self.active = None;
                 let open: Vec<Uuid> = self.workspaces.iter().map(|w| w.id()).collect();
-                let actions = self.home.ui(ui, &self.conns, &open, &self.settings, &self.store);
+                // Each open workspace shows the colour picked for it (tag or driver colour by default).
+                let open_ws: Vec<(Uuid, String, egui::Color32)> = self.workspaces.iter().map(|w| (w.id(), w.cfg.display_name(), rgb(w.cfg.accent()))).collect();
+                let actions = self.home.ui(ui, &self.conns, &open, &self.settings, &open_ws);
+                // An editor opened on a saved connection gets its passwords once, when it opens.
+                match self.home.editing().map(|c| c.id) {
+                    Some(id) if self.editor_secrets != Some(id) => {
+                        self.editor_secrets = Some(id);
+                        if let Some(mut cfg) = self.home.editing().cloned() {
+                            self.with_secrets(&mut cfg);
+                            if let Some(ed) = self.home.editing() {
+                            ed.password = cfg.password;
+                            ed.ssh.password = cfg.ssh.password;
+                            ed.ssh.key_passphrase = cfg.ssh.key_passphrase;
+                            }
+                        }
+                    }
+                    Some(_) => {}
+                    None => self.editor_secrets = None,
+                }
                 for a in actions {
                     self.handle_home(a, &ctx);
                 }
@@ -693,7 +643,6 @@ impl eframe::App for StrataApp {
             self.active = self.workspaces.iter().position(|ws| ws.id() == id);
         }
         if show_home {
-            self.home.refresh_activity();
             self.active = None;
         }
         if let Some(command) = workspace_command {
@@ -721,6 +670,10 @@ impl eframe::App for StrataApp {
             self.settings_open = open;
             for e in events {
                 match e {
+                    SettingsEvent::CheckForUpdates => {
+                        self.updates.about_open = true;
+                        self.updates.check(&ctx, true);
+                    }
                     SettingsEvent::ImportTheme(t) => {
                         self.themes.retain(|x| x.name != t.name);
                         if t.dark {
@@ -790,7 +743,7 @@ impl StrataApp {
         let mut app_request = None;
         let mut show_home = false;
         let choices: Vec<workspace::WorkspaceChoice> = self.workspaces.iter().map(|ws| workspace::WorkspaceChoice {
-            id: ws.id(), name: ws.cfg.display_name(), color: rgb(ws.cfg.accent()),
+            id: ws.id(), name: ws.cfg.display_name(),
         }).collect();
         let mut sh = workspace::Shared {
             store: &self.store, settings: &self.settings, queries: &mut self.queries, boards: &mut self.boards,

@@ -25,16 +25,8 @@ impl LocationPicker {
             // egui may already have scheduled spatial focus movement before we consumed the key.
             ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
         }
-        let search = ui.add(
-            egui::TextEdit::singleline(&mut self.query)
-                .event_filter(egui::EventFilter {
-                    horizontal_arrows: true,
-                    vertical_arrows: true,
-                    ..Default::default()
-                })
-                .hint_text("Search…")
-                .desired_width(f32::INFINITY),
-        );
+        let width = ui.available_width();
+        let search = super::form::field(ui, &mut self.query, "Search", super::Icon::Search, width);
         if !self.focused {
             search.request_focus();
             self.focused = true;
@@ -60,25 +52,23 @@ impl LocationPicker {
         if enter {
             chosen = filtered.get(self.selected).map(|name| (*name).clone());
         }
-        ui.separator();
+        ui.add_space(6.0);
         let height = (ui.ctx().content_rect().height() - 160.0).clamp(80.0, 320.0);
         egui::ScrollArea::vertical()
             .max_height(height)
             .auto_shrink([false, true])
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
                 if filtered.is_empty() {
-                    ui.label(super::dim("No matches"));
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+                    let pal = super::p();
+                    ui.painter().text(egui::pos2(r.left() + 10.0, r.center().y), egui::Align2::LEFT_CENTER, "No matches", egui::FontId::proportional(13.0), pal.text_faint);
                 }
                 for (i, name) in filtered.iter().enumerate() {
-                    let label = if name.as_str() == current {
-                        format!("✓ {name}")
-                    } else {
-                        (*name).clone()
-                    };
-                    let response = ui
-                        .add(egui::Button::selectable(i == self.selected, label).truncate())
-                        .on_hover_text(name.as_str());
+                    let response = super::form::menu_row(ui, name, name.as_str() == current, i == self.selected);
+                    if response.hovered() && response.ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+                        self.selected = i;
+                    }
                     if reveal && i == self.selected {
                         response.scroll_to_me(None);
                     }

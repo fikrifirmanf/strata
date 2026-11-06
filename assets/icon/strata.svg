@@ -1,13 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <defs>
-    <linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#232B36"/>
-      <stop offset="1" stop-color="#12161C"/>
-    </linearGradient>
-  </defs>
-  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#ground)"/>
-  <rect x="101.5" y="101.5" width="821" height="821" rx="184.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="3"/>
-  <polygon points="242.0,362.0 512.0,242.0 782.0,362.0 512.0,482.0" fill="#F2B252"/>
-  <polyline points="242.0,512.0 512.0,632.0 782.0,512.0" fill="none" stroke="#F2B252" stroke-width="66"/>
-  <polyline points="242.0,662.0 512.0,782.0 782.0,662.0" fill="none" stroke="#5CC8E0" stroke-width="66"/>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="#1E1C1A"/>
+  <rect x="360" y="276" width="400" height="72" rx="18" fill="#E7E1D6"/>
+  <rect x="264" y="376" width="256" height="72" rx="18" fill="#8E867B"/>
+  <rect x="360" y="476" width="304" height="72" rx="18" fill="#F0AB43"/>
+  <rect x="504" y="576" width="256" height="72" rx="18" fill="#54D1B8"/>
+  <rect x="264" y="676" width="400" height="72" rx="18" fill="#E7E1D6"/>
 </svg>

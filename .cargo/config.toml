@@ -1,0 +1,7 @@
+# Sign macOS dev builds with a stable identity before `cargo run` (see scripts/setup-signing.sh),
+# so the keychain doesn't ask again after every rebuild.
+[target.aarch64-apple-darwin]
+runner = "scripts/cargo-runner.sh"
+
+[target.x86_64-apple-darwin]
+runner = "scripts/cargo-runner.sh"

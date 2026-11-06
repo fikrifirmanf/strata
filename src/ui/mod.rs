@@ -1,6 +1,7 @@
 //! Shared widgets: vector icons, buttons, pills, tiles, toasts, fonts.
 
 pub mod about;
+pub mod form;
 pub mod assistant;
 pub mod diagram;
 pub mod dialogs;
@@ -11,6 +12,7 @@ pub mod home;
 pub mod json_tree;
 pub mod location_picker;
 pub mod metrics;
+pub mod motion;
 pub mod object_editor;
 pub mod query_tab;
 pub mod settings;
@@ -103,6 +105,8 @@ pub enum Icon {
     Window,
     Bell,
     Wand,
+    Contrast,
+    Sliders,
 }
 
 /// Draws a stroke icon inside `rect`.
@@ -413,6 +417,19 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
                 line(a, b);
             }
         }
+        Icon::Contrast => {
+            painter.circle_stroke(c, 5.5 * u, st);
+            let pts: Vec<Pos2> = (0..=16).map(|i| { let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 16.0; c + vec2(a.cos(), a.sin()) * 5.5 * u }).collect();
+            painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+        }
+        Icon::Sliders => {
+            line(p(2.5, 5.0), p(8.5, 5.0));
+            line(p(11.5, 5.0), p(13.5, 5.0));
+            line(p(2.5, 11.0), p(4.5, 11.0));
+            line(p(7.5, 11.0), p(13.5, 11.0));
+            painter.circle_stroke(p(10.0, 5.0), 1.5 * u, st);
+            painter.circle_stroke(p(6.0, 11.0), 1.5 * u, st);
+        }
     }
 }
 
@@ -442,7 +459,7 @@ pub fn primary_button(ui: &mut Ui, text: &str) -> Response {
         egui::Button::new(egui::RichText::new(text).color(pal.on_accent).strong())
             .fill(pal.accent)
             .stroke(Stroke::NONE)
-            .corner_radius(CornerRadius::same(10))
+            .corner_radius(CornerRadius::same(6))
             .min_size(vec2(0.0, 32.0)),
     )
 }
@@ -454,7 +471,7 @@ pub fn danger_button(ui: &mut Ui, text: &str) -> Response {
 
 pub fn secondary_button(ui: &mut Ui, text: &str) -> Response {
     let pal = p();
-    ui.add(egui::Button::new(egui::RichText::new(text).color(pal.text)).fill(Color32::TRANSPARENT).stroke(Stroke::new(1.0, pal.border)).corner_radius(CornerRadius::same(10)).min_size(vec2(0.0, 32.0)))
+    ui.add(egui::Button::new(egui::RichText::new(text).color(pal.text)).fill(Color32::TRANSPARENT).stroke(Stroke::new(1.0, pal.border)).corner_radius(CornerRadius::same(6)).min_size(vec2(0.0, 32.0)))
 }
 
 pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
@@ -471,10 +488,8 @@ pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
 
 /// Rounded brand-colored square with a soft top highlight, like Termius' host icons.
 fn paint_badge_ground(painter: &egui::Painter, rect: Rect, color: Color32) {
-    let size = rect.width();
-    let top = mix(color, Color32::WHITE, 0.12);
-    painter.rect_filled(rect, CornerRadius::same((size * 0.28) as u8), color);
-    painter.rect_filled(Rect::from_min_max(rect.min, pos2(rect.max.x, rect.center().y)), CornerRadius { nw: (size * 0.28) as u8, ne: (size * 0.28) as u8, sw: 0, se: 0 }, top.gamma_multiply(0.35));
+    // Flat brand square: 6 px corners on a 32 px tile.
+    painter.rect_filled(rect, CornerRadius::same((rect.width() * 0.1875).round() as u8), color);
 }
 
 /// White on dark brand colors, near-black on light ones (ClickHouse, DuckDB yellow).
@@ -573,27 +588,10 @@ pub fn line_edit(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
     egui::TextEdit::singleline(text).align(Align2::LEFT_CENTER)
 }
 
-/// Search box with a leading magnifier. Returns the text edit response.
-pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
-    let pal = p();
-    let well = if pal.dark { Color32::from_black_alpha(70) } else { Color32::from_black_alpha(10) };
-    let frame = egui::Frame::new().fill(well).stroke(Stroke::new(1.0, pal.glass_stroke)).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::symmetric(10, 6));
-    frame
-        .show(ui, |ui| {
-            ui.allocate_ui_with_layout(vec2(width - 22.0, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let (r, _) = ui.allocate_exact_size(vec2(14.0, 20.0), Sense::hover());
-                paint_icon(ui.painter(), Rect::from_center_size(r.center(), vec2(13.0, 13.0)), Icon::Search, pal.text_faint);
-                ui.add(line_edit(text).hint_text(faint(hint)).frame(egui::Frame::NONE).desired_width(width - 46.0))
-            })
-            .inner
-        })
-        .inner
-}
-
 pub fn card_frame() -> egui::Frame {
     let pal = p();
-    egui::Frame::new().fill(pal.content).stroke(Stroke::new(1.0, pal.glass_stroke)).corner_radius(CornerRadius::same(16)).inner_margin(egui::Margin::same(14))
+    // Bento tile: surface 1 on the ground, hairline edge, 10 px corners.
+    egui::Frame::new().fill(pal.sidebar).stroke(Stroke::new(1.0, pal.glass_stroke)).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::same(16))
 }
 
 pub fn empty_state(ui: &mut Ui, icon: Icon, title: &str, subtitle: &str) {
@@ -601,7 +599,7 @@ pub fn empty_state(ui: &mut Ui, icon: Icon, title: &str, subtitle: &str) {
     ui.vertical_centered(|ui| {
         ui.add_space((ui.available_height() * 0.28).max(20.0));
         let (r, _) = ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
-        ui.painter().rect_filled(r, CornerRadius::same(16), pal.surface);
+        ui.painter().rect_filled(r, CornerRadius::same(10), pal.surface);
         paint_icon(ui.painter(), Rect::from_center_size(r.center(), vec2(26.0, 26.0)), icon, pal.text_faint);
         ui.add_space(10.0);
         ui.label(egui::RichText::new(title).size(15.0).strong());
@@ -611,24 +609,7 @@ pub fn empty_state(ui: &mut Ui, icon: Icon, title: &str, subtitle: &str) {
 
 /// Small segmented control.
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)]) -> bool {
-    let pal = p();
-    let mut changed = false;
-    let well = if pal.dark { Color32::from_black_alpha(80) } else { Color32::from_black_alpha(12) };
-    egui::Frame::new().fill(well).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::same(3)).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            for (v, label) in options {
-                let selected = *value == *v;
-                let text = egui::RichText::new(*label).size(12.0).color(if selected { pal.text } else { pal.text_dim });
-                let b = egui::Button::new(text).fill(if selected { pal.surface_hover } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).corner_radius(CornerRadius::same(8)).min_size(vec2(0.0, 26.0));
-                if ui.add(b).clicked() && !selected {
-                    *value = *v;
-                    changed = true;
-                }
-            }
-        });
-    });
-    changed
+    form::seg_control(ui, value, options, 0.0)
 }
 
 /// Shared chrome surface. Solid fill keeps panels consistent over any desktop.
@@ -636,15 +617,14 @@ pub fn glass_frame() -> egui::Frame {
     let pal = p();
     egui::Frame::new()
         .fill(pal.sidebar)
-        .stroke(Stroke::new(1.0, pal.border))
-        .corner_radius(CornerRadius::same(12))
+        .stroke(Stroke::new(1.0, pal.glass_stroke))
+        .corner_radius(CornerRadius::same(10))
         .inner_margin(egui::Margin::same(12))
 }
 
-/// A solid card for data (grid, editor): never translucent, so text keeps its contrast.
-pub fn content_frame() -> egui::Frame {
-    let pal = p();
-    egui::Frame::new().fill(pal.content).stroke(Stroke::new(1.0, pal.glass_stroke)).corner_radius(CornerRadius::same(12))
+/// Flat chrome for a docked panel: surface 1, no radius. The panel's own separator draws the edge.
+pub fn flat_panel(margin: i8) -> egui::Frame {
+    egui::Frame::new().fill(p().sidebar).inner_margin(egui::Margin::same(margin))
 }
 
 /// Stable window ground, with only a restrained hint of the desktop translucency.
@@ -683,30 +663,6 @@ pub fn env_chip(ui: &mut Ui, label: &str, color: Color32, strong: bool) -> Respo
 /// Text color that stays readable on a tint of `color`.
 pub fn readable_on_tint(color: Color32) -> Color32 {
     if p().dark { mix(color, Color32::WHITE, 0.45) } else { mix(color, Color32::BLACK, 0.35) }
-}
-
-/// A glass capsule with an icon and a short status, e.g. safe mode.
-pub fn status_chip(ui: &mut Ui, icon: Icon, text: &str, color: Color32) -> Response {
-    let pal = p();
-    let galley = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(12.0), pal.text_dim);
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 40.0, 36.0), Sense::click());
-    ui.painter().rect_filled(rect, CornerRadius::same(255), if resp.hovered() { pal.surface_hover } else { pal.glass });
-    ui.painter().rect_stroke(rect, CornerRadius::same(255), Stroke::new(1.0, pal.glass_stroke), egui::StrokeKind::Inside);
-    paint_icon(ui.painter(), Rect::from_center_size(pos2(rect.left() + 18.0, rect.center().y), vec2(14.0, 14.0)), icon, color);
-    ui.painter().galley(pos2(rect.left() + 30.0, rect.center().y - galley.size().y / 2.0), galley, pal.text_dim);
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// A glass capsule with a colored dot, e.g. latency.
-pub fn status_dot_chip(ui: &mut Ui, text: &str, dot: Color32) -> Response {
-    let pal = p();
-    let galley = ui.painter().layout_no_wrap(text.to_string(), FontId::monospace(11.5), pal.text_dim);
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 34.0, 36.0), Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(255), pal.glass);
-    ui.painter().rect_stroke(rect, CornerRadius::same(255), Stroke::new(1.0, pal.glass_stroke), egui::StrokeKind::Inside);
-    ui.painter().circle_filled(pos2(rect.left() + 16.0, rect.center().y), 3.5, dot);
-    ui.painter().galley(pos2(rect.left() + 26.0, rect.center().y - galley.size().y / 2.0), galley, pal.text_dim);
-    resp
 }
 
 /// 1234 → "1.2k", 48212 → "48.2k", 902114 → "902k", 3.1M.
@@ -788,7 +744,7 @@ impl Toasts {
                 let r = egui::Frame::new()
                     .fill(pal.sheet())
                     .stroke(Stroke::new(1.0, pal.glass_stroke))
-                    .corner_radius(CornerRadius::same(14))
+                    .corner_radius(CornerRadius::same(10))
                     .shadow(egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(90) })
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
@@ -812,15 +768,18 @@ impl Toasts {
     }
 }
 
-/// Bundled Geist (OFL) for a consistent look on every platform; system fonts stay as fallbacks
-/// for scripts Geist lacks.
+/// Bundled OFL fonts for a consistent look on every platform: Instrument Sans for the UI,
+/// Spline Sans Mono for code and numbers, Bricolage Grotesque for display titles only.
+/// System fonts stay as fallbacks for scripts these lack.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    let bundled: [(&str, &'static [u8]); 4] = [
-        ("geist", include_bytes!("../../assets/fonts/Geist-Regular.ttf")),
-        ("geist-medium", include_bytes!("../../assets/fonts/Geist-Medium.ttf")),
-        ("geist-semibold", include_bytes!("../../assets/fonts/Geist-SemiBold.ttf")),
-        ("geist-mono", include_bytes!("../../assets/fonts/GeistMono-Regular.ttf")),
+    let bundled: [(&str, &'static [u8]); 6] = [
+        ("sans", include_bytes!("../../assets/fonts/InstrumentSans-Regular.ttf")),
+        ("sans-medium", include_bytes!("../../assets/fonts/InstrumentSans-Medium.ttf")),
+        ("sans-semibold", include_bytes!("../../assets/fonts/InstrumentSans-SemiBold.ttf")),
+        ("mono", include_bytes!("../../assets/fonts/SplineSansMono-Regular.ttf")),
+        ("mono-medium", include_bytes!("../../assets/fonts/SplineSansMono-Medium.ttf")),
+        ("display", include_bytes!("../../assets/fonts/BricolageGrotesque-SemiBold.ttf")),
     ];
     for (name, bytes) in bundled {
         fonts.font_data.insert(name.to_string(), Arc::new(egui::FontData::from_static(bytes)));
@@ -837,31 +796,168 @@ pub fn install_fonts(ctx: &egui::Context) {
         fonts.font_data.insert("system-ui".into(), Arc::new(egui::FontData::from_owned(bytes)));
     }
     let prop = fonts.families.entry(egui::FontFamily::Proportional).or_default();
-    prop.insert(0, "geist".into());
+    prop.insert(0, "sans".into());
     if fonts.font_data.contains_key("system-ui") {
         prop.insert(1, "system-ui".into());
     }
     let defaults = prop.clone();
     let mono = fonts.families.entry(egui::FontFamily::Monospace).or_default();
-    mono.insert(0, "geist-mono".into());
+    mono.insert(0, "mono".into());
     if fonts.font_data.contains_key("system-ui") {
         mono.push("system-ui".into());
     }
-    for (family, first) in [("medium", "geist-medium"), ("semibold", "geist-semibold")] {
+    let mono_defaults = mono.clone();
+    for (family, first) in [("medium", "sans-medium"), ("semibold", "sans-semibold"), ("display", "display")] {
         let mut list = vec![first.to_string()];
         list.extend(defaults.iter().cloned());
         fonts.families.insert(egui::FontFamily::Name(family.into()), list);
     }
+    let mut list = vec!["mono-medium".to_string()];
+    list.extend(mono_defaults);
+    fonts.families.insert(egui::FontFamily::Name("mono-medium".into()), list);
     ctx.set_fonts(fonts);
 }
 
-/// Geist SemiBold at `size`, for titles and emphasis (egui has no synthetic bold).
+/// Bricolage Grotesque SemiBold, for the wordmark and large display titles only.
+pub fn display(size: f32) -> FontId {
+    FontId::new(size, egui::FontFamily::Name("display".into()))
+}
+
+/// Spline Sans Mono Medium, for SQL keywords and emphasized code.
+pub fn mono_medium(size: f32) -> FontId {
+    FontId::new(size, egui::FontFamily::Name("mono-medium".into()))
+}
+
+/// Instrument Sans SemiBold at `size`, for titles and emphasis (egui has no synthetic bold).
 pub fn semibold(size: f32) -> FontId {
     FontId::new(size, egui::FontFamily::Name("semibold".into()))
 }
 
 pub fn medium(size: f32) -> FontId {
     FontId::new(size, egui::FontFamily::Name("medium".into()))
+}
+
+/// Hairline between rows: 8% of the text colour over the ground (the design's `--line`).
+pub fn line() -> Color32 {
+    if p().dark { Color32::from_white_alpha(20) } else { Color32::from_black_alpha(20) }
+}
+
+/// Edge of a control or a bordered group: 14% (the design's `--line2`).
+pub fn line2() -> Color32 {
+    if p().dark { Color32::from_white_alpha(36) } else { Color32::from_black_alpha(36) }
+}
+
+/// Environment colour, tuned per theme so it stays readable as a dot and as text.
+pub fn env_color(t: crate::model::Tag) -> Color32 {
+    use crate::model::Tag;
+    let dark = p().dark;
+    let h = |d: &str, l: &str| crate::theme::hex(if dark { d } else { l }).unwrap_or(Color32::GRAY);
+    match t {
+        Tag::None => p().text_faint,
+        Tag::Local => h("#86D596", "#1F7235"),
+        Tag::Development => h("#54D1B8", "#0A6E5C"),
+        Tag::Testing => h("#8DB1F2", "#2A5BB0"),
+        Tag::Staging => h("#E4CB5C", "#6F5A00"),
+        Tag::Production => h("#F47C66", "#B23520"),
+    }
+}
+
+/// Primary key colour (ochre) and foreign key colour (teal).
+pub fn pk_color() -> Color32 { crate::theme::hex(if p().dark { "#F0AB43" } else { "#945600" }).unwrap_or(Color32::GOLD) }
+pub fn fk_color() -> Color32 { crate::theme::hex(if p().dark { "#54D1B8" } else { "#0A6E5C" }).unwrap_or(Color32::LIGHT_BLUE) }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BtnKind {
+    Primary,
+    Secondary,
+    Ghost,
+}
+
+/// The one button: 32 px tall, 12 px sides, 6 px corners, Medium 13. The hover fill eases in.
+pub fn btn(ui: &mut Ui, text: &str, kind: BtnKind) -> Response {
+    btn_sized(ui, text, kind, 32.0)
+}
+
+/// A button with a leading 16 px icon and an optional trailing shortcut in mono.
+pub fn btn_icon(ui: &mut Ui, icon: Icon, text: &str, shortcut: &str, kind: BtnKind) -> Response {
+    let pal = p();
+    let enabled = ui.is_enabled();
+    let fg = match kind {
+        BtnKind::Primary => pal.on_accent,
+        BtnKind::Secondary => pal.text,
+        BtnKind::Ghost => pal.text_dim,
+    };
+    let g = ui.painter().layout_no_wrap(text.to_string(), medium(13.0), fg);
+    let k = ui.painter().layout_no_wrap(shortcut.to_string(), FontId::monospace(12.0), fg);
+    let kw = if shortcut.is_empty() { 0.0 } else { k.size().x + 8.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(12.0 + 16.0 + 8.0 + g.size().x + kw + 12.0, 32.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
+    let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() && enabled, motion::FAST as f32);
+    let r = CornerRadius::same(6);
+    let fade = if enabled { 1.0 } else { 0.45 };
+    let mut color = fg;
+    match kind {
+        BtnKind::Primary => { ui.painter().rect_filled(rect, r, mix(pal.accent, Color32::WHITE, 0.08 * t).gamma_multiply(fade)); }
+        BtnKind::Secondary => {
+            if t > 0.0 { ui.painter().rect_filled(rect, r, pal.surface_hover.gamma_multiply(t)); }
+            ui.painter().rect_stroke(rect, r, Stroke::new(1.0, line2()), egui::StrokeKind::Inside);
+        }
+        BtnKind::Ghost => {
+            if t > 0.0 { ui.painter().rect_filled(rect, r, pal.surface_hover.gamma_multiply(t)); }
+            color = mix(pal.text_dim, pal.text, t);
+        }
+    }
+    let color = color.gamma_multiply(fade);
+    paint_icon(ui.painter(), Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), vec2(16.0, 16.0)), icon, color);
+    let x = rect.left() + 36.0;
+    let gw = g.size().x;
+    ui.painter().galley(pos2(x, rect.center().y - g.size().y / 2.0), g, color);
+    if !shortcut.is_empty() {
+        ui.painter().galley(pos2(x + gw + 8.0, rect.center().y - k.size().y / 2.0), k, color.gamma_multiply(0.75));
+    }
+    if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
+}
+
+pub fn btn_sized(ui: &mut Ui, text: &str, kind: BtnKind, h: f32) -> Response {
+    let pal = p();
+    let enabled = ui.is_enabled();
+    let fg = match kind {
+        BtnKind::Primary => pal.on_accent,
+        BtnKind::Secondary => pal.text,
+        BtnKind::Ghost => pal.text_dim,
+    };
+    let g = ui.painter().layout_no_wrap(text.to_string(), medium(13.0), fg);
+    let (rect, resp) = ui.allocate_exact_size(vec2(g.size().x + 24.0, h), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
+    let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() && enabled, motion::FAST as f32);
+    let r = CornerRadius::same(6);
+    let painter = ui.painter();
+    let fade = if enabled { 1.0 } else { 0.45 };
+    let mut text_color = fg;
+    match kind {
+        BtnKind::Primary => { painter.rect_filled(rect, r, mix(pal.accent, Color32::WHITE, 0.08 * t).gamma_multiply(fade)); }
+        BtnKind::Secondary => {
+            if t > 0.0 { painter.rect_filled(rect, r, pal.surface_hover.gamma_multiply(t)); }
+            painter.rect_stroke(rect, r, Stroke::new(1.0, line2()), egui::StrokeKind::Inside);
+        }
+        BtnKind::Ghost => {
+            if t > 0.0 { painter.rect_filled(rect, r, pal.surface_hover.gamma_multiply(t)); }
+            text_color = mix(pal.text_dim, pal.text, t);
+        }
+    }
+    painter.galley(rect.center() - g.size() / 2.0, g, text_color.gamma_multiply(fade));
+    if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
+}
+
+/// 32 px square icon button: text2, s3 plate on hover.
+pub fn tool_button(ui: &mut Ui, icon: Icon, tip: &str, active: bool) -> Response {
+    let pal = p();
+    let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip));
+    let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() || active, motion::FAST as f32);
+    if t > 0.0 { ui.painter().rect_filled(rect, CornerRadius::same(6), pal.surface_hover.gamma_multiply(t)); }
+    paint_icon(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), icon, mix(pal.text_dim, pal.text, t));
+    resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A heading in SemiBold.
@@ -906,5 +1002,27 @@ mod tests {
 /// Copies text to the clipboard through egui (works on every backend).
 pub fn copy(ctx: &egui::Context, text: impl Into<String>) {
     ctx.copy_text(text.into());
+}
+
+
+/// The short spelling of a column type for the sidebar and ER cards: "character varying(255)" → "varchar(255)".
+pub fn short_type(t: &str) -> String {
+    let t = t.trim().to_lowercase();
+    const SHORT: [(&str, &str); 8] = [
+        ("character varying", "varchar"),
+        ("timestamp without time zone", "timestamp"),
+        ("timestamp with time zone", "timestamptz"),
+        ("time without time zone", "time"),
+        ("time with time zone", "timetz"),
+        ("double precision", "float8"),
+        ("boolean", "bool"),
+        ("character", "char"),
+    ];
+    for (long, short) in SHORT {
+        if let Some(rest) = t.strip_prefix(long) {
+            return format!("{short}{rest}");
+        }
+    }
+    t
 }
 

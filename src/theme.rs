@@ -161,110 +161,113 @@ impl Palette {
         p
     }
 
-    /// Strata's default: an ink ground, glass chrome, amber and mineral-cyan accents.
+    /// Strata's default, "Basalt": flat warm-stone layers, translucent-grey hairlines, one ochre
+    /// accent. Lines are the opaque result of white at 8 % and 14 % over the panel tone, because
+    /// several painters `mix` palette colours, which ignores alpha.
     pub fn night() -> Palette {
         Palette {
             name: "Strata Night".into(),
             dark: true,
-            window: hex("#0B0E13").unwrap(),
-            content: hex("#12161C").unwrap(),
-            sidebar: hex("#181E27").unwrap(),
-            rail: hex("#141920").unwrap(),
-            surface: hex("#1A2029").unwrap(),
-            surface_hover: hex("#232B36").unwrap(),
-            border: hex("#2A323D").unwrap(),
-            separator: hex("#1F262F").unwrap(),
-            text: hex("#E8ECF1").unwrap(),
-            text_dim: hex("#A3ADBA").unwrap(),
-            text_faint: hex("#7D8794").unwrap(),
-            accent: hex("#F2B252").unwrap(),
-            on_accent: hex("#1A1308").unwrap(),
-            success: hex("#5BD69A").unwrap(),
-            warning: hex("#F2B252").unwrap(),
-            danger: hex("#FF6B5B").unwrap(),
-            tab_selected: hex("#232B36").unwrap(),
-            grid_header: hex("#151A21").unwrap(),
-            grid_header_text: hex("#F4F6F9").unwrap(),
-            grid_even: hex("#12161C").unwrap(),
-            grid_odd: hex("#141920").unwrap(),
-            grid_text: hex("#E2E7ED").unwrap(),
-            grid_number: hex("#BCEBF5").unwrap(),
-            grid_placeholder: hex("#7D8794").unwrap(),
-            grid_separator: hex("#1C222A").unwrap(),
-            grid_selection: hex("#173039").unwrap(),
-            grid_selection_border: hex("#5CC8E0").unwrap(),
-            modified: hex("#3A3020").unwrap(),
-            inserted: hex("#163226").unwrap(),
-            deleted: hex("#3A1F1F").unwrap(),
-            editor_bg: hex("#12161C").unwrap(),
-            editor_text: hex("#E2E7ED").unwrap(),
-            editor_keyword: hex("#F2B252").unwrap(),
-            editor_function: hex("#5CC8E0").unwrap(),
-            editor_string: hex("#B9E58C").unwrap(),
-            editor_dquote: hex("#F0A6CA").unwrap(),
-            editor_backtick: hex("#F7C77A").unwrap(),
-            editor_number: hex("#F59E8B").unwrap(),
-            editor_comment: hex("#7D8794").unwrap(),
-            editor_current_query: hex("#161B22").unwrap(),
-            editor_selection: hex("#2A3D4C").unwrap(),
-            chart: [hex("#5CC8E0").unwrap(), hex("#F2B252").unwrap(), hex("#5BD69A").unwrap(), hex("#FF8A7E").unwrap(), hex("#8FB4D8").unwrap()],
-            ground: Color32::from_rgba_unmultiplied(11, 14, 19, 236),
-            glass: hex("#181E27").unwrap(),
-            glass_stroke: Color32::from_rgba_unmultiplied(255, 255, 255, 24),
-            accent2: hex("#5CC8E0").unwrap(),
+            window: hex("#0F0E0D").unwrap(),
+            content: hex("#0F0E0D").unwrap(),
+            sidebar: hex("#161514").unwrap(),
+            rail: hex("#161514").unwrap(),
+            surface: hex("#1E1C1A").unwrap(),
+            surface_hover: hex("#292623").unwrap(),
+            border: hex("#373635").unwrap(),
+            separator: hex("#292827").unwrap(),
+            text: hex("#F0EDE7").unwrap(),
+            text_dim: hex("#B8B2A8").unwrap(),
+            text_faint: hex("#928C82").unwrap(),
+            accent: hex("#F0AB43").unwrap(),
+            on_accent: hex("#1F1405").unwrap(),
+            success: hex("#86D596").unwrap(),
+            warning: hex("#F0AB43").unwrap(),
+            danger: hex("#F47C66").unwrap(),
+            tab_selected: hex("#292623").unwrap(),
+            grid_header: hex("#161514").unwrap(),
+            grid_header_text: hex("#F0EDE7").unwrap(),
+            grid_even: hex("#0F0E0D").unwrap(),
+            grid_odd: hex("#0F0E0D").unwrap(),
+            grid_text: hex("#F0EDE7").unwrap(),
+            grid_number: hex("#F0EDE7").unwrap(),
+            grid_placeholder: hex("#928C82").unwrap(),
+            grid_separator: hex("#292827").unwrap(),
+            grid_selection: hex("#272625").unwrap(),
+            grid_selection_border: hex("#C8C4BC").unwrap(),
+            modified: hex("#3A2C14").unwrap(),
+            inserted: hex("#201F1E").unwrap(),
+            deleted: hex("#3D1D18").unwrap(),
+            editor_bg: hex("#0F0E0D").unwrap(),
+            editor_text: hex("#B8B2A8").unwrap(),
+            editor_keyword: hex("#F0EDE7").unwrap(),
+            editor_function: hex("#F0EDE7").unwrap(),
+            editor_string: hex("#B8B2A8").unwrap(),
+            editor_dquote: hex("#B8B2A8").unwrap(),
+            editor_backtick: hex("#B8B2A8").unwrap(),
+            editor_number: hex("#B8B2A8").unwrap(),
+            editor_comment: hex("#928C82").unwrap(),
+            editor_current_query: hex("#161514").unwrap(),
+            editor_selection: hex("#3A2C14").unwrap(),
+            chart: [hex("#3987E5").unwrap(), hex("#D95926").unwrap(), hex("#199E70").unwrap(), hex("#C98500").unwrap(), hex("#D55181").unwrap()],
+            ground: Color32::from_rgba_unmultiplied(15, 14, 13, 236),
+            glass: hex("#161514").unwrap(),
+            glass_stroke: hex("#292827").unwrap(),
+            accent2: hex("#54D1B8").unwrap(),
         }
     }
 
+    /// "Limestone", the light counterpart of Basalt.
     pub fn day() -> Palette {
         Palette {
             name: "Strata Day".into(),
             dark: false,
-            window: hex("#E9EDF2").unwrap(),
-            content: hex("#FFFFFF").unwrap(),
-            sidebar: hex("#F6F8FA").unwrap(),
-            rail: hex("#F1F4F7").unwrap(),
+            window: hex("#F1EEE7").unwrap(),
+            content: hex("#F1EEE7").unwrap(),
+            sidebar: hex("#FAF8F4").unwrap(),
+            rail: hex("#FAF8F4").unwrap(),
             surface: hex("#FFFFFF").unwrap(),
-            surface_hover: hex("#EDF1F5").unwrap(),
-            border: hex("#D5DBE3").unwrap(),
-            separator: hex("#E4E8EE").unwrap(),
-            text: hex("#141A22").unwrap(),
-            text_dim: hex("#4E5A6A").unwrap(),
-            text_faint: hex("#677180").unwrap(),
-            accent: hex("#A35C00").unwrap(),
+            surface_hover: hex("#EAE6DD").unwrap(),
+            border: hex("#D7D5D2").unwrap(),
+            separator: hex("#E6E4E0").unwrap(),
+            text: hex("#1B1916").unwrap(),
+            text_dim: hex("#555048").unwrap(),
+            text_faint: hex("#6B665C").unwrap(),
+            accent: hex("#945600").unwrap(),
             on_accent: Color32::WHITE,
-            success: hex("#0F7A4B").unwrap(),
-            warning: hex("#A35C00").unwrap(),
-            danger: hex("#C2352A").unwrap(),
-            tab_selected: hex("#FFFFFF").unwrap(),
-            grid_header: hex("#F6F8FA").unwrap(),
-            grid_header_text: hex("#141A22").unwrap(),
-            grid_even: hex("#FFFFFF").unwrap(),
-            grid_odd: hex("#F8FAFB").unwrap(),
-            grid_text: hex("#1B232D").unwrap(),
-            grid_number: hex("#0E5E75").unwrap(),
-            grid_placeholder: hex("#7A8494").unwrap(),
-            grid_separator: hex("#EBEEF2").unwrap(),
-            grid_selection: hex("#DCF1F6").unwrap(),
-            grid_selection_border: hex("#0E7490").unwrap(),
-            modified: hex("#FCEFD6").unwrap(),
-            inserted: hex("#DDF4E7").unwrap(),
-            deleted: hex("#FBE1DE").unwrap(),
-            editor_bg: hex("#FFFFFF").unwrap(),
-            editor_text: hex("#1B232D").unwrap(),
-            editor_keyword: hex("#A35C00").unwrap(),
-            editor_function: hex("#0E7490").unwrap(),
-            editor_string: hex("#2F7D1F").unwrap(),
-            editor_dquote: hex("#B42D72").unwrap(),
-            editor_backtick: hex("#8A5A00").unwrap(),
-            editor_number: hex("#B9381F").unwrap(),
-            editor_comment: hex("#7A8494").unwrap(),
-            editor_current_query: hex("#F7F9FB").unwrap(),
-            editor_selection: hex("#CDE9F1").unwrap(),
-            chart: [hex("#0E7490").unwrap(), hex("#C27A0E").unwrap(), hex("#0F7A4B").unwrap(), hex("#C2352A").unwrap(), hex("#5B6B8C").unwrap()],
-            ground: Color32::from_rgba_unmultiplied(233, 237, 242, 230),
-            glass: hex("#FFFFFF").unwrap(),
-            glass_stroke: Color32::from_rgba_unmultiplied(20, 30, 45, 26),
-            accent2: hex("#0E7490").unwrap(),
+            success: hex("#1F7235").unwrap(),
+            warning: hex("#945600").unwrap(),
+            danger: hex("#B23520").unwrap(),
+            tab_selected: hex("#EAE6DD").unwrap(),
+            grid_header: hex("#FAF8F4").unwrap(),
+            grid_header_text: hex("#1B1916").unwrap(),
+            grid_even: hex("#F1EEE7").unwrap(),
+            grid_odd: hex("#F1EEE7").unwrap(),
+            grid_text: hex("#1B1916").unwrap(),
+            grid_number: hex("#1B1916").unwrap(),
+            grid_placeholder: hex("#6B665C").unwrap(),
+            grid_separator: hex("#E6E4E0").unwrap(),
+            grid_selection: hex("#E1DFDB").unwrap(),
+            grid_selection_border: hex("#45413A").unwrap(),
+            modified: hex("#F8E9CC").unwrap(),
+            inserted: hex("#EDEBE8").unwrap(),
+            deleted: hex("#F9E0DA").unwrap(),
+            editor_bg: hex("#F1EEE7").unwrap(),
+            editor_text: hex("#555048").unwrap(),
+            editor_keyword: hex("#1B1916").unwrap(),
+            editor_function: hex("#1B1916").unwrap(),
+            editor_string: hex("#555048").unwrap(),
+            editor_dquote: hex("#555048").unwrap(),
+            editor_backtick: hex("#555048").unwrap(),
+            editor_number: hex("#555048").unwrap(),
+            editor_comment: hex("#6B665C").unwrap(),
+            editor_current_query: hex("#FAF8F4").unwrap(),
+            editor_selection: hex("#F8E9CC").unwrap(),
+            chart: [hex("#2A78D6").unwrap(), hex("#EB6834").unwrap(), hex("#1BAF7A").unwrap(), hex("#EDA100").unwrap(), hex("#E87BA4").unwrap()],
+            ground: Color32::from_rgba_unmultiplied(241, 238, 231, 230),
+            glass: hex("#FAF8F4").unwrap(),
+            glass_stroke: hex("#E6E4E0").unwrap(),
+            accent2: hex("#0A6E5C").unwrap(),
         }
     }
 
@@ -384,7 +387,7 @@ impl Palette {
 
     pub fn apply(&self, ctx: &egui::Context, scale: f32) {
         let mut v = if self.dark { Visuals::dark() } else { Visuals::light() };
-        let r = CornerRadius::same(8);
+        let r = CornerRadius::same(6);
         v.override_text_color = Some(self.text);
         // Panels paint their own glass or solid cards; the default fill would cover the ground.
         v.panel_fill = Color32::TRANSPARENT;
@@ -393,15 +396,16 @@ impl Palette {
         v.faint_bg_color = self.grid_odd;
         v.code_bg_color = self.surface_hover;
         v.window_stroke = Stroke::new(1.0, self.glass_stroke);
-        v.window_corner_radius = CornerRadius::same(20);
-        v.menu_corner_radius = CornerRadius::same(14);
+        v.window_corner_radius = CornerRadius::same(10);
+        v.menu_corner_radius = CornerRadius::same(6);
         v.hyperlink_color = self.accent2;
-        v.selection.bg_fill = mix(self.content, self.accent2, if self.dark { 0.35 } else { 0.25 });
-        v.selection.stroke = Stroke::new(1.0, self.accent2);
+        // Neutral selection: chosen controls read by weight and fill, not by a second hue.
+        v.selection.bg_fill = mix(self.content, self.text, if self.dark { 0.16 } else { 0.12 });
+        v.selection.stroke = Stroke::new(1.0, self.text);
         v.warn_fg_color = self.warning;
         v.error_fg_color = self.danger;
-        v.text_cursor.stroke = Stroke::new(2.0, self.accent);
-        v.striped = true;
+        v.text_cursor.stroke = Stroke::new(1.5, self.text);
+        v.striped = false;
         v.widgets.noninteractive.bg_fill = self.surface;
         v.widgets.noninteractive.weak_bg_fill = self.surface;
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.separator);
@@ -428,18 +432,23 @@ impl Palette {
         v.widgets.open.bg_fill = self.surface_hover;
         v.widgets.open.weak_bg_fill = self.surface_hover;
         v.popup_shadow = egui::Shadow { offset: [0, 12], blur: 32, spread: 0, color: Color32::from_black_alpha(if self.dark { 140 } else { 46 }) };
-        v.window_shadow = egui::Shadow { offset: [0, 24], blur: 64, spread: 0, color: Color32::from_black_alpha(if self.dark { 150 } else { 56 }) };
+        v.window_shadow = egui::Shadow { offset: [0, 16], blur: 48, spread: 0, color: Color32::from_black_alpha(if self.dark { 150 } else { 56 }) };
         ctx.set_theme(if self.dark { egui::Theme::Dark } else { egui::Theme::Light });
         ctx.set_visuals(v);
         ctx.all_styles_mut(|s| {
             s.spacing.item_spacing = egui::vec2(8.0, 6.0);
             s.spacing.menu_margin = egui::Margin::same(8);
-            s.spacing.window_margin = egui::Margin::same(20);
+            s.spacing.window_margin = egui::Margin::same(16);
             s.spacing.button_padding = egui::vec2(12.0, 6.0);
             s.spacing.interact_size.y = 30.0;
             s.spacing.scroll.bar_width = 8.0;
             s.spacing.scroll.floating = true;
+            // Lists stop at their ends. egui's rubber band stretched past the last row and
+            // sprang back, and a nested grid bounced twice (once per scroll area).
+            s.spacing.scroll.kinetic.rubber_band = false;
             s.interaction.selectable_labels = false;
+            // Unfolds and fades run on the design's "settle" duration.
+            s.animation_time = crate::ui::motion::SETTLE as f32;
         });
         ctx.set_zoom_factor(scale);
     }

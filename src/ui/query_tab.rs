@@ -3,7 +3,7 @@
 use super::editor::{Catalog, SqlEditor};
 use super::grid::{self, GridEvent, GridState, ResultSource};
 use super::workspace::{TabCtx, WsAction};
-use super::{dim, faint, icon_button, p, paint_icon, segmented, Icon, ToastKind};
+use super::{dim, faint, p, paint_icon, Icon, ToastKind};
 use crate::db::QueryResult;
 use crate::model::Dialect;
 use crate::model::ConnectionConfig;
@@ -299,70 +299,78 @@ impl QueryTab {
         let pal = p();
         let dialect = cx.session.dialect();
 
-        egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 10, bottom: 10 }).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
+        // Editor bar: Run leads, the rest are quiet; position and transaction mode on the right.
+        egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 8 }).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.set_min_height(32.0);
+                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                let ready = context_ready && !self.transaction_busy();
                 if self.is_running() {
-                    let b = egui::Button::new(RichText::new("Stop  ⌘.").font(super::semibold(12.5)).color(Color32::WHITE)).fill(pal.danger).corner_radius(CornerRadius::same(255)).min_size(vec2(0.0, 32.0));
-                    if ui.add(b).clicked() {
+                    if super::btn_icon(ui, Icon::Stop, "Stop", "⌘.", super::BtnKind::Secondary).clicked() {
                         self.cancel(cx.session);
                     }
-                    ui.add(egui::Spinner::new().size(14.0).color(pal.accent));
                     if let Some(t) = &self.task {
                         ui.label(RichText::new(format!("{:.1}s", t.started.elapsed().as_secs_f32())).font(egui::FontId::monospace(12.0)).color(pal.text_dim));
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
                     }
                 } else {
-                    let b = egui::Button::new(RichText::new("▶  Run  ⌘↩").font(super::semibold(12.5)).color(pal.on_accent)).fill(pal.accent).corner_radius(CornerRadius::same(255)).min_size(vec2(0.0, 32.0));
-                    if ui.add_enabled(context_ready && !self.transaction_busy(), b).on_hover_text("Run the statement under the caret, or the selection").clicked() {
+                    let run = ui.add_enabled_ui(ready, |ui| super::btn_icon(ui, Icon::Play, "Run", "⌘↵", super::BtnKind::Primary)).inner;
+                    if run.on_hover_text("Run the statement under the caret, or the selection").clicked() {
                         cx.actions.push(WsAction::RunQuery { tab_id: self.id, sql: self.current_sql() });
                     }
-                    let b = egui::Button::new(RichText::new("Run all  ⌘⇧↩").size(12.5).color(pal.text)).fill(Color32::TRANSPARENT).stroke(Stroke::new(1.0, pal.border)).corner_radius(CornerRadius::same(255)).min_size(vec2(0.0, 32.0));
-                    if ui.add_enabled(context_ready && !self.transaction_busy(), b).clicked() {
+                    if ui.add_enabled_ui(ready, |ui| super::btn(ui, "Run all", super::BtnKind::Ghost)).inner.on_hover_text("Run every statement (⌘⇧↵)").clicked() {
                         cx.actions.push(WsAction::RunQuery { tab_id: self.id, sql: self.sql.clone() });
                     }
                 }
-                ui.add_space(4.0);
+                if !matches!(dialect, Dialect::Redis | Dialect::Mongo) && super::btn(ui, "Format", super::BtnKind::Ghost).on_hover_text("Format (⌘⇧F)").clicked() {
+                    self.editor.format(&mut self.sql, cx.settings.uppercase_keywords, cx.settings.tab_width);
+                    self.dirty = true;
+                }
+                if super::btn(ui, if self.saved_id.is_some() { "Saved" } else { "Save" }, super::BtnKind::Ghost).on_hover_text("Save to Queries (⌘S)").clicked() {
+                    cx.actions.push(WsAction::SaveQuery(self.id));
+                }
                 if let Some(prefix) = explain_prefix(dialect) {
-                    if icon_button(ui, Icon::Activity, "Explain: show the query plan").clicked() {
+                    if super::btn(ui, "Explain", super::BtnKind::Ghost).on_hover_text("Show the query plan").clicked() {
                         let sql = format!("{prefix} {}", self.current_sql());
                         cx.actions.push(WsAction::RunQuery { tab_id: self.id, sql });
                     }
                 }
-                if !matches!(dialect, Dialect::Redis | Dialect::Mongo) && icon_button(ui, Icon::Wand, "Format (⌘⇧F)").clicked() {
-                    self.editor.format(&mut self.sql, cx.settings.uppercase_keywords, cx.settings.tab_width);
-                    self.dirty = true;
-                }
-                if super::icon_button_colored(ui, Icon::Star, if self.saved_id.is_some() { "Saved to Queries (⌘S)" } else { "Save to Queries (⌘S)" }, None, self.saved_id.is_some()).clicked() {
-                    cx.actions.push(WsAction::SaveQuery(self.id));
-                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let line = self.sql[..char_byte(&self.sql, self.editor.cursor_char)].matches('\n').count() + 1;
-                    ui.label(RichText::new(format!("Ln {line}")).font(egui::FontId::monospace(11.5)).color(pal.text_faint));
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    let before = &self.sql[..char_byte(&self.sql, self.editor.cursor_char)];
+                    let line = before.matches('\n').count() + 1;
+                    let col = before.rsplit('\n').next().map(|l| l.chars().count()).unwrap_or(0) + 1;
+                    ui.label(RichText::new(format!("Ln {line}, Col {col}")).font(egui::FontId::monospace(12.0)).color(pal.text_faint));
+                    let supported = query_transaction::supported(&cx.session.cfg);
+                    if supported {
+                        if !self.auto_commit {
+                            let state = self.transaction_state();
+                            if ui.add_enabled_ui(self.has_pending_transaction() && !self.transaction_busy(), |ui| super::btn(ui, "Rollback", super::BtnKind::Ghost)).inner.clicked() {
+                                self.finish_transaction(cx.ctx, false);
+                            }
+                            if ui.add_enabled_ui(state == TransactionState::Active && !self.transaction_busy(), |ui| super::btn(ui, "Commit", super::BtnKind::Secondary)).inner.clicked() {
+                                self.finish_transaction(cx.ctx, true);
+                            }
+                            let status = if self.finish_task.is_some() { "Finishing…" } else { match state { TransactionState::Idle => "Starts on Run", TransactionState::Active => "Pending", TransactionState::Failed => "Failed, roll back", TransactionState::Unknown => "Outcome unknown" } };
+                            ui.label(RichText::new(status).font(egui::FontId::monospace(12.0)).color(if state == TransactionState::Idle { pal.text_faint } else { pal.warning }));
+                            if state == TransactionState::Unknown && !self.transaction_busy() && super::btn(ui, "Close connection…", super::BtnKind::Ghost).clicked() {
+                                cx.actions.push(WsAction::ResolveUncertain(self.id));
+                            }
+                        }
+                        let mut auto_commit = self.auto_commit;
+                        let changed = ui.add_enabled_ui(!self.transaction_busy(), |ui| super::form::switch(ui, &mut auto_commit, "Auto-commit")).inner;
+                        if changed {
+                            cx.actions.push(WsAction::SetAutoCommit { tab: self.id, enabled: auto_commit });
+                        }
+                        ui.label(RichText::new("Auto-commit").color(pal.text_dim)).on_hover_text("When off, changes stay pending until Commit or Rollback");
+                    }
                     if self.runs.len() > 1 {
                         run_sparkline(ui, &self.runs);
                     }
                 });
             });
-            ui.horizontal_wrapped(|ui| {
-                let supported = query_transaction::supported(&cx.session.cfg);
-                let mut auto_commit = self.auto_commit || !supported;
-                if ui.add_enabled(supported && !self.transaction_busy(), egui::Checkbox::new(&mut auto_commit, "Auto-commit")).on_hover_text(if supported { "When off, changes stay pending until Commit or Rollback" } else { "Persistent manual transactions are unavailable for this connection" }).changed() {
-                    cx.actions.push(WsAction::SetAutoCommit { tab: self.id, enabled: auto_commit });
-                }
-                if supported && !self.auto_commit {
-                    let state = self.transaction_state();
-                    if ui.add_enabled(state == TransactionState::Active && !self.transaction_busy(), egui::Button::new("Commit")).clicked() { self.finish_transaction(cx.ctx, true); }
-                    if ui.add_enabled(self.has_pending_transaction() && !self.transaction_busy(), egui::Button::new("Rollback")).clicked() { self.finish_transaction(cx.ctx, false); }
-                    let status = if self.finish_task.is_some() { "Finishing transaction…" } else { match state { TransactionState::Idle => "Transaction starts on Run", TransactionState::Active => "Pending transaction", TransactionState::Failed => "Failed transaction — Rollback required", TransactionState::Unknown => "Outcome unknown — Rollback or close connection" } };
-                    ui.label(RichText::new(status).size(11.5).color(if state == TransactionState::Idle { pal.text_dim } else { pal.warning }));
-                    if state == TransactionState::Unknown && !self.transaction_busy() && ui.button("Close uncertain connection…").clicked() {
-                        cx.actions.push(WsAction::ResolveUncertain(self.id));
-                    }
-                }
-            });
         });
-        ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, pal.separator));
+        ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, super::line()));
 
         let has_results = !self.results.is_empty() || !self.messages.is_empty();
         let mut ev = Default::default();
@@ -398,7 +406,6 @@ impl QueryTab {
             self.editor.format(&mut self.sql, cx.settings.uppercase_keywords, cx.settings.tab_width);
         }
         if has_results {
-            ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, pal.separator));
             self.results_ui(ui, cx);
         }
     }
@@ -406,7 +413,7 @@ impl QueryTab {
     fn ask_ui(&mut self, ui: &mut Ui, cx: &mut TabCtx, catalog: &Catalog) {
         let pal = p();
         let well = if pal.dark { Color32::from_black_alpha(70) } else { Color32::from_black_alpha(8) };
-        egui::Frame::new().fill(well).stroke(Stroke::new(1.0, pal.glass_stroke)).corner_radius(CornerRadius::same(14)).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
+        egui::Frame::new().fill(well).stroke(Stroke::new(1.0, pal.glass_stroke)).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(vec2(16.0, 22.0), egui::Sense::hover());
                 paint_icon(ui.painter(), egui::Rect::from_center_size(r.center(), vec2(15.0, 15.0)), Icon::Sparkle, pal.accent);
@@ -468,14 +475,15 @@ impl QueryTab {
         let pal = p();
         let many = self.results.len() + usize::from(!self.messages.is_empty()) > 1;
         egui::ScrollArea::vertical().id_salt(("cells", self.id)).auto_shrink([false, false]).show(ui, |ui| {
-            egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+            egui::Frame::new().show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
                 if !self.messages.is_empty() {
                     let failed = self.messages.iter().any(|(ok, _)| !ok);
                     let tone = if failed { pal.danger } else { pal.success };
                     egui::Frame::new()
                         .fill(Color32::from_rgba_unmultiplied(tone.r(), tone.g(), tone.b(), 22))
                         .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(tone.r(), tone.g(), tone.b(), 70)))
-                        .corner_radius(CornerRadius::same(14))
+                        .corner_radius(CornerRadius::same(10))
                         .inner_margin(egui::Margin::symmetric(14, 10))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
@@ -498,7 +506,6 @@ impl QueryTab {
                 let n = self.results.len();
                 for idx in 0..n {
                     self.cell_ui(ui, cx, idx, many);
-                    ui.add_space(12.0);
                 }
             });
         });
@@ -508,22 +515,26 @@ impl QueryTab {
         let pal = p();
         let id = self.id;
         let rv = &mut self.results[idx];
-        egui::Frame::new().fill(pal.grid_even).stroke(Stroke::new(1.0, pal.glass_stroke)).corner_radius(CornerRadius::same(14)).show(ui, |ui| {
+        egui::Frame::new().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 8, top: 6, bottom: 6 }).show(ui, |ui| {
+            // Result header: 40 px on s1 between hairlines.
+            let head = egui::Frame::new().fill(pal.sidebar).inner_margin(egui::Margin { left: 12, right: 8, top: 4, bottom: 4 }).show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    ui.set_min_height(32.0);
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    let (r, resp) = ui.allocate_exact_size(vec2(14.0, 22.0), egui::Sense::click());
-                    paint_icon(ui.painter(), egui::Rect::from_center_size(r.center(), vec2(10.0, 10.0)), if rv.collapsed { Icon::ChevronRight } else { Icon::ChevronDown }, pal.text_faint);
-                    if resp.clicked() {
+                    let (r, resp) = ui.allocate_exact_size(vec2(24.0, 24.0), egui::Sense::click());
+                    let t = ui.ctx().animate_bool_with_time(resp.id.with("open"), !rv.collapsed, super::motion::SETTLE as f32);
+                    super::home::paint_chevron(ui.painter(), egui::Rect::from_center_size(r.center(), vec2(12.0, 12.0)), t, pal.text_dim);
+                    if resp.on_hover_text(if rv.collapsed { "Show results" } else { "Hide results" }).clicked() {
                         rv.collapsed = !rv.collapsed;
                     }
-                    ui.label(RichText::new("✓").color(pal.success));
-                    ui.label(RichText::new(format!("{} ms · {} row{}", rv.result.elapsed_ms, rv.rows.len(), if rv.rows.len() == 1 { "" } else { "s" })).font(egui::FontId::monospace(11.5)).color(pal.text_dim));
+                    let (cr, _) = ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
+                    paint_icon(ui.painter(), cr, Icon::Check, pal.text_dim);
+                    ui.label(RichText::new(format!("{} ms · {} row{}", rv.result.elapsed_ms, rv.rows.len(), if rv.rows.len() == 1 { "" } else { "s" })).font(egui::FontId::monospace(12.0)).color(pal.text_dim));
                     let w = (ui.available_width() - 230.0).max(40.0);
-                    ui.add_sized([w, 18.0], egui::Label::new(RichText::new(crate::db::sqlgen::ellipsize(&rv.result.sql, 120)).font(egui::FontId::monospace(11.5)).color(pal.text_faint)).truncate());
+                    ui.add_sized([w, 18.0], egui::Label::new(RichText::new(crate::db::sqlgen::ellipsize(&rv.result.sql.replace('\n', " "), 160)).font(egui::FontId::monospace(12.0)).color(pal.text_faint)).truncate());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icon_button(ui, Icon::Export, "Export this result…").clicked() {
+                        if super::tool_button(ui, Icon::Export, "Export this result…", false).clicked() {
                             cx.actions.push(WsAction::ExportResult { columns: rv.result.columns.clone(), rows: rv.rows.clone() });
                         }
                         let mut views = vec![(CellView::Table, "Table")];
@@ -535,13 +546,16 @@ impl QueryTab {
                         }
                         if views.len() > 1 {
                             let mut v = rv.view;
-                            if segmented(ui, &mut v, &views) {
+                            if super::form::seg_well(ui, &mut v, &views, 0.0) {
                                 rv.view = v;
                             }
                         }
                     });
                 });
             });
+            let hr = head.response.rect;
+            ui.painter().hline(hr.x_range(), hr.top() + 0.5, Stroke::new(1.0, super::line()));
+            ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, super::line()));
             if rv.collapsed {
                 return;
             }
@@ -562,12 +576,9 @@ impl QueryTab {
                         let opts = grid::GridOptions {
                             id: egui::Id::unique(("result-grid", id, idx)),
                             editable: false,
-                            row_numbers: cx.settings.show_row_numbers,
-                            alternating: cx.settings.alternating_rows,
                             null_text: &cx.settings.null_display,
                             font_size: cx.settings.grid_font_size,
-                            row_offset: 0,
-                            profiles: cx.settings.column_profiles,
+                            row_height: None,
                         };
                         let src = ResultSource { meta: rv.meta.clone(), rows: &rv.rows, sort: &rv.sort };
                         let events = grid::show(ui, &src, &mut rv.grid, &opts);

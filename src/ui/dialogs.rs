@@ -188,7 +188,11 @@ impl Modal {
 
 pub(super) fn modal_window(ctx: &egui::Context, title: &str, width: f32, add: impl FnOnce(&mut egui::Ui)) -> bool {
     let mut open = true;
-    let resp = egui::Modal::new(egui::Id::unique(("modal", title))).frame(egui::Frame::window(&ctx.global_style()).inner_margin(egui::Margin::same(18))).show(ctx, |ui| {
+    let id = egui::Id::unique(("modal", title));
+    // Dialogs rise 8 px into place over `ENTER` while egui fades them in.
+    let rise = 8.0 * (1.0 - super::motion::ease_out(super::motion::entered(ctx, id, super::motion::ENTER)));
+    let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, rise));
+    let resp = egui::Modal::new(id).area(area).frame(egui::Frame::window(&ctx.global_style()).inner_margin(egui::Margin::same(16))).show(ctx, |ui| {
         ui.set_width(width.min((ctx.content_rect().width() - 64.0).max(280.0)));
         ui.horizontal(|ui| {
             ui.label(RichText::new(title).size(16.0).strong());
@@ -542,7 +546,7 @@ fn review_ui(ctx: &egui::Context, st: &mut ReviewState, info: &ModalInfo, outcom
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(vec2(40.0, 40.0), egui::Sense::hover());
                 let tone = if production { pal.danger } else { pal.accent };
-                ui.painter().rect_filled(r, egui::CornerRadius::same(12), egui::Color32::from_rgba_unmultiplied(tone.r(), tone.g(), tone.b(), 40));
+                ui.painter().rect_filled(r, egui::CornerRadius::same(10), egui::Color32::from_rgba_unmultiplied(tone.r(), tone.g(), tone.b(), 40));
                 paint_icon(ui.painter(), egui::Rect::from_center_size(r.center(), vec2(20.0, 20.0)), Icon::Shield, readable_on_tint(tone));
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
@@ -578,7 +582,7 @@ fn review_ui(ctx: &egui::Context, st: &mut ReviewState, info: &ModalInfo, outcom
                         egui::Frame::new()
                             .fill(if pal.dark { egui::Color32::from_white_alpha(6) } else { egui::Color32::from_black_alpha(6) })
                             .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(tone.r(), tone.g(), tone.b(), 80)))
-                            .corner_radius(egui::CornerRadius::same(14))
+                            .corner_radius(egui::CornerRadius::same(10))
                             .inner_margin(egui::Margin::symmetric(14, 12))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
@@ -681,7 +685,7 @@ fn review_ui(ctx: &egui::Context, st: &mut ReviewState, info: &ModalInfo, outcom
                     let ok = typed_ok && pass_ok;
                     let fill = if ok { if production { pal.danger } else { pal.accent } } else { pal.surface_hover };
                     let text_color = if ok { if production { egui::Color32::WHITE } else { pal.on_accent } } else { pal.text_faint };
-                    let b = egui::Button::new(RichText::new(label).font(semibold(13.0)).color(text_color)).fill(fill).corner_radius(egui::CornerRadius::same(12)).min_size(vec2(0.0, 38.0));
+                    let b = egui::Button::new(RichText::new(label).font(semibold(13.0)).color(text_color)).fill(fill).corner_radius(egui::CornerRadius::same(6)).min_size(vec2(0.0, 38.0));
                     if ui.add_enabled(ok, b).clicked() {
                         *outcome = ModalOutcome::Approved(Gated::Changes(st.tab));
                     }
@@ -1112,7 +1116,7 @@ fn import_ui(ctx: &egui::Context, st: &mut ImportState, info: &ModalInfo, outcom
                 grid::profile_all(&mut meta, &preview_rows);
                 let src = grid::ResultSource { meta, rows: &preview_rows, sort: &[] };
                 let mut gs = grid::GridState::default();
-                let opts = grid::GridOptions { id: egui::Id::unique("import-preview"), editable: false, row_numbers: true, alternating: true, null_text: "NULL", font_size: 12.0, row_offset: 0, profiles: true };
+                let opts = grid::GridOptions { id: egui::Id::unique("import-preview"), editable: false, null_text: "NULL", font_size: 12.0, row_height: None };
                 grid::show(ui, &src, &mut gs, &opts);
             });
         }

@@ -77,6 +77,10 @@ To publish a release:
 
 The tag build checks that the tag matches `Cargo.toml`, builds all three platforms and creates the GitHub release with the files attached. The in-app update check compares against that version. The CircleCI project needs a `GH_TOKEN` environment variable holding a GitHub token that can create releases on this repository.
 
+### macOS signing and keychain prompts
+
+macOS remembers "Always Allow" on a keychain item per code signature. Ad-hoc signed builds get a new signature every time, so each build asks again. Run `scripts/setup-signing.sh` once to create a self-signed "Strata Local Signing" certificate in your login keychain. After that, `cargo run` (through `scripts/cargo-runner.sh`) and `scripts/package-macos.sh` sign with it, and the keychain stays allowed across rebuilds. Without the certificate, both fall back to ad-hoc signing. Release builds from CI are still ad-hoc signed.
+
 ## Interface
 
 The workspace has one explorer panel with connection buttons above the table filter and saved-query and history controls below the object list. The header groups the connection, database, schema and search controls. On smaller windows, the header splits into two rows and the inspector opens over the workspace. Panels have solid fills and the background has no decorative lines. The minimum window size is 960 × 600. Wide tables scroll horizontally.
@@ -111,7 +115,7 @@ The driver picker filters OLTP databases, OLAP/warehouses and operational stores
 - Saved connections with groups, tags (local / development / testing / staging / production), colors, and search
 - Import from a URL (`postgres://`, `mysql+ssh://`, `redis://`, …) and copy a connection URL
 - Export and import connection bundles (passwords are never exported)
-- Passwords stored in the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service via GNOME Keyring or KWallet). When no keychain is reachable they go to `secrets.json` in the data folder, readable only by your user
+- Passwords stored in the OS keychain, in one item read on first connect, never at launch (macOS Keychain, Windows Credential Manager, Linux Secret Service via GNOME Keyring or KWallet). When no keychain is reachable they go to `secrets.json` in the data folder, readable only by your user
 - Test connection, keep-alive ping every 30 s, startup query, reconnect (⌘⇧R)
 - Safe modes: Silent, Alert 1 and 2 (confirm before sending), Safe 1 and 2 (password before sending); plus a per-connection read-only mode
 - Multiple open workspaces, reopened at launch

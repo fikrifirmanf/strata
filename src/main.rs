@@ -69,7 +69,7 @@ fn main() -> anyhow::Result<()> {
         .with_min_inner_size([960.0, 600.0])
         .with_app_id("dev.strata.app")
         .with_transparent(translucent);
-    // Same three-layer mark as the header logo; sets the Dock, taskbar and window icon.
+    // The "Row S" app icon; sets the Dock, taskbar and window icon.
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/strata.png")) {
         viewport = viewport.with_icon(icon);
     }

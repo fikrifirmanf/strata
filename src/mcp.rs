@@ -52,6 +52,7 @@ fn find_connection(store: &Store, name: &str) -> Result<ConnectionConfig> {
         .iter()
         .find(|c| c.id.to_string() == name || c.display_name().eq_ignore_ascii_case(name))
         .cloned()
+        .map(|mut c| { store.fill_secrets(&mut c); c })
         .ok_or_else(|| anyhow!("No saved connection named '{name}'. Call list_connections first."))
 }
 
@@ -168,9 +169,10 @@ mod tests {
     use super::*;
 
     fn store() -> Store {
+        // A test store: the real one would read the user's keychain.
         let dir = std::env::temp_dir().join(format!("strata-mcp-{}", uuid::Uuid::new_v4()));
-        std::env::set_var("STRATA_HOME", &dir);
-        Store::open().unwrap()
+        std::fs::create_dir_all(&dir).unwrap();
+        Store::for_test(dir)
     }
 
     #[test]

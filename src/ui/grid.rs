@@ -1,6 +1,6 @@
 //! Virtualized data grid with inline editing, change tinting, sorting and context actions.
 
-use super::{p, paint_icon, Icon};
+use super::p;
 use crate::db::EditValue;
 use chrono::Datelike;
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, FontId, Key, Modifiers, Rect, Sense, Stroke, Ui};
@@ -52,12 +52,6 @@ pub struct ColProfile {
     pub categories: Vec<(String, usize)>,
     /// Render values as colored pills (few short categories).
     pub pills: bool,
-}
-
-impl ColProfile {
-    pub fn category_index(&self, v: &str) -> Option<usize> {
-        self.categories.iter().position(|(c, _)| c == v)
-    }
 }
 
 fn date_days(s: &str) -> Option<f64> {
@@ -178,6 +172,10 @@ pub struct GridState {
     focused: bool,
     pub hidden: BTreeSet<usize>,
     scroll_to: Option<usize>,
+    /// The gliding cursor ring: the cell it last sat on, and the offset it is travelling from.
+    ring_cell: Option<(usize, usize)>,
+    ring_last: Option<Rect>,
+    ring_from: Option<(egui::Vec2, egui::Vec2, f64)>,
 }
 
 impl GridState {
@@ -211,16 +209,21 @@ pub fn first_line(s: &str, max: usize) -> String {
     out
 }
 
+/// Cell borders: a light grey, a step brighter than the app's hairline so rows and columns read.
+fn grid_line() -> Color32 {
+    if p().dark { Color32::from_white_alpha(30) } else { Color32::from_black_alpha(26) }
+}
+
+/// Shown in an empty-string cell, in the NULL placeholder style.
+pub const EMPTY_TEXT: &str = "empty";
+
 pub struct GridOptions<'a> {
     pub id: egui::Id,
     pub editable: bool,
-    pub row_numbers: bool,
-    pub alternating: bool,
     pub null_text: &'a str,
     pub font_size: f32,
-    pub row_offset: usize,
-    /// Draw value-shape bars under each header.
-    pub profiles: bool,
+    /// Row height from the density control; `None` follows the font size.
+    pub row_height: Option<f32>,
 }
 
 /// Keeps one trackpad gesture on one axis. A vertical swipe always drifts a little sideways, and
@@ -241,6 +244,42 @@ fn lock_scroll_axis(ui: &Ui, id: egui::Id) {
     ui.ctx().data_mut(|m| m.insert_temp(id, (horizontal, now)));
 }
 
+/// Where a cell's text sits and how it looks. Reading and typing share it, so nothing moves
+/// when an edit starts: same rect, font, colour and alignment, only the ring and caret change.
+struct CellLayout {
+    font: FontId,
+    color: Color32,
+    right: bool,
+}
+
+impl CellLayout {
+    fn for_column(meta: &ColMeta, font: &FontId, mono: &FontId) -> CellLayout {
+        let t = meta.data_type.to_ascii_lowercase();
+        let pal = p();
+        if is_numeric_type(&t) && !meta.foreign_key {
+            CellLayout { font: mono.clone(), color: pal.grid_number, right: true }
+        } else if meta.foreign_key {
+            CellLayout { font: mono.clone(), color: pal.grid_text, right: true }
+        } else if t.contains("json") || t.contains("date") || t.contains("time") || t.contains("uuid") {
+            CellLayout { font: mono.clone(), color: pal.text_dim, right: false }
+        } else {
+            CellLayout { font: font.clone(), color: pal.grid_text, right: false }
+        }
+    }
+
+    /// The text box inside a cell: 12 px in from each side, one line tall, centred vertically.
+    /// A foreign-key cell keeps room for its arrow whether or not it is shown.
+    fn text_rect(&self, ui: &Ui, cell: Rect, fk: bool) -> Rect {
+        let line = ui.fonts_mut(|f| f.row_height(&self.font));
+        let inner = cell.with_max_x(cell.right() - if fk { 28.0 } else { 12.0 }).with_min_x(cell.left() + 12.0);
+        Rect::from_center_size(inner.center(), vec2(inner.width().max(1.0), line))
+    }
+
+    fn anchor(&self, r: Rect) -> (egui::Pos2, Align2) {
+        if self.right { (r.right_center(), Align2::RIGHT_CENTER) } else { (r.left_center(), Align2::LEFT_CENTER) }
+    }
+}
+
 pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOptions) -> Vec<GridEvent> {
     let pal = p();
     let mut events = Vec::new();
@@ -249,7 +288,11 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
     let n_rows = src.row_count();
     let font = FontId::proportional(opt.font_size);
     let mono = FontId::monospace(opt.font_size - 0.5);
-    let row_h = (opt.font_size * 1.85).round();
+    let row_h = opt.row_height.unwrap_or((opt.font_size + 19.0).round());
+    let layouts: Vec<CellLayout> = cols.iter().map(|m| CellLayout::for_column(m, &font, &mono)).collect();
+    // Screen rect of the cursor cell this frame, and the body's clip, for the gliding ring.
+    let mut cursor_rect: Option<Rect> = None;
+    let mut body_clip: Option<Rect> = None;
 
     keyboard(ui, src, st, opt, &visible, n_rows, &mut events);
     let shift_held = ui.input(|i| i.modifiers.shift);
@@ -257,6 +300,10 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
 
     // TableBuilder only scrolls vertically; wide result sets scroll sideways in this outer area.
     egui::ScrollArea::horizontal().id_salt(opt.id.with("hscroll")).auto_shrink([false, false]).show(ui, |ui| {
+        // Swiss grid: horizontal rules only. The resize handle still shows on hover and drag.
+        ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::NONE;
+        // Cells butt against each other so header fill, rules and selection run unbroken; text carries its own inset.
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         let mut table = TableBuilder::new(ui)
             .id_salt(opt.id)
             .striped(false)
@@ -268,11 +315,7 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
         if let Some(r) = st.scroll_to.take() {
             table = table.scroll_to_row(r, None);
         }
-        if opt.row_numbers {
-            let digits = (opt.row_offset + n_rows).max(1).to_string().len() as f32;
-            table = table.column(Column::exact(18.0 + digits * 7.5).resizable(false));
-        }
-        for &c in &visible {
+        for (i, &c) in visible.iter().enumerate() {
             // Size from the header and a sample of values ("fit content").
             let sample = (0..n_rows.min(40))
                 .map(|r| match src.cell(r, c) {
@@ -282,76 +325,47 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
                 })
                 .max()
                 .unwrap_or(0);
-            let header_chars = cols[c].name.chars().count() + cols[c].data_type.chars().count() / 2 + 4;
-            let w = sample.max(header_chars) as f32 * opt.font_size * 0.6 + 26.0;
-            table = table.column(Column::initial(w.clamp(70.0, 340.0)).at_least(40.0).clip(true).resizable(true));
+            let header_chars = cols[c].name.chars().count() + 2;
+            let w = sample.max(header_chars) as f32 * opt.font_size * 0.6 + 24.0 + if cols[c].foreign_key { 16.0 } else { 0.0 };
+            // The last column takes the rest of the width, so the grid never stops short.
+            table = if i + 1 == visible.len() {
+                table.column(Column::remainder().at_least(w.clamp(70.0, 340.0)).clip(true))
+            } else {
+                table.column(Column::initial(w.clamp(70.0, 340.0)).at_least(40.0).clip(true).resizable(true))
+            };
         }
 
-        let show_profiles = opt.profiles && cols.iter().any(|c| c.profile.is_some());
-        let header_h = if show_profiles { row_h + 34.0 } else { row_h + 8.0 };
         table
-            .header(header_h, |mut header| {
-                if opt.row_numbers {
-                    header.col(|ui| {
-                        let r = ui.max_rect().expand2(vec2(4.0, 0.0));
-                        ui.painter().rect_filled(r, CornerRadius::ZERO, pal.grid_header);
-                        ui.painter().line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0, pal.grid_separator));
-                        ui.painter().text(pos2(r.right() - 8.0, r.top() + 14.0), Align2::RIGHT_CENTER, "#", FontId::monospace(opt.font_size - 2.0), pal.text_faint);
-                    });
-                }
-                for &c in &visible {
+            .header(40.0, |mut header| {
+                for (vi, &c) in visible.iter().enumerate() {
                     let meta = &cols[c];
-                    let (rect, resp) = header.col(|ui| {
+                    let lay = &layouts[c];
+                    let (_, resp) = header.col(|ui| {
                         let r = ui.max_rect().expand2(vec2(4.0, 0.0));
                         ui.painter().rect_filled(r, CornerRadius::ZERO, pal.grid_header);
-                        ui.painter().line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0, pal.grid_separator));
-                        ui.painter().line_segment([r.left_top(), r.left_bottom()], Stroke::new(1.0, pal.grid_separator));
-                        let painter = ui.painter_at(r.shrink2(vec2(2.0, 0.0)));
-                        let mut x = r.left() + 10.0;
-                        let name_y = if show_profiles { r.top() + 13.0 } else { r.center().y };
-                        if meta.primary_key || meta.foreign_key {
-                            let icon_rect = Rect::from_center_size(pos2(x + 6.0, name_y), vec2(12.0, 12.0));
-                            paint_icon(&painter, icon_rect, if meta.primary_key { Icon::Key } else { Icon::Link }, if meta.primary_key { pal.accent } else { pal.accent2 });
-                            x += 17.0;
+                        let hovered = ui.rect_contains_pointer(ui.max_rect());
+                        if hovered {
+                            ui.painter().rect_filled(ui.max_rect(), CornerRadius::ZERO, pal.surface);
                         }
-                        painter.text(pos2(x, name_y), Align2::LEFT_CENTER, &meta.name, super::semibold(opt.font_size), pal.grid_header_text);
-                        let mut type_line = meta.data_type.to_lowercase();
-                        if let Some(prof) = &meta.profile {
-                            if prof.null_frac >= 0.3 {
-                                type_line = format!("{type_line} · {:.0}% null", prof.null_frac * 100.0);
-                            }
+                        let cell = ui.max_rect();
+                        ui.painter().hline(r.x_range(), cell.bottom() - 0.5, Stroke::new(1.0, grid_line()));
+                        if vi + 1 < visible.len() {
+                            ui.painter().vline(cell.right() - 0.5, r.y_range(), Stroke::new(1.0, grid_line()));
                         }
-                        if show_profiles {
-                            painter.text(pos2(r.left() + 10.0, r.top() + 29.0), Align2::LEFT_CENTER, type_line, FontId::monospace(opt.font_size - 2.5), pal.text_faint);
-                            if let Some(prof) = &meta.profile {
-                                let base_y = r.bottom() - 6.0;
-                                let bar_w = 5.0;
-                                let color = match prof.kind {
-                                    ProfileKind::Unique | ProfileKind::Empty => pal.text_faint.gamma_multiply(0.45),
-                                    ProfileKind::Categorical => pal.accent.gamma_multiply(0.8),
-                                    ProfileKind::Text => pal.text_faint.gamma_multiply(0.6),
-                                    _ => pal.accent2.gamma_multiply(0.7),
-                                };
-                                for (i, h) in prof.bars.iter().take(12).enumerate() {
-                                    let bx = r.left() + 10.0 + i as f32 * (bar_w + 2.0);
-                                    if bx + bar_w > r.right() - 18.0 {
-                                        break;
-                                    }
-                                    let bh = (h * 12.0).max(1.5);
-                                    painter.rect_filled(Rect::from_min_max(pos2(bx, base_y - bh), pos2(bx + bar_w, base_y)), CornerRadius::same(1), color);
-                                }
-                            }
-                        } else if !meta.data_type.is_empty() {
-                            let w = ui.painter().layout_no_wrap(meta.name.clone(), super::semibold(opt.font_size), pal.text).size().x;
-                            painter.text(pos2(x + w + 6.0, name_y + 1.0), Align2::LEFT_CENTER, type_line, FontId::monospace(opt.font_size - 2.5), pal.text_faint);
-                        }
-                        if let Some(asc) = src.sort_of(c) {
-                            let ar = Rect::from_center_size(pos2(r.right() - 12.0, name_y), vec2(9.0, 9.0));
+                        // Name only: no type, no strip. Keys keep their colour.
+                        let name_color = if meta.primary_key { super::pk_color() } else if meta.foreign_key { super::fk_color() } else { pal.grid_header_text };
+                        let sorted = src.sort_of(c);
+                        let inner = r.shrink2(vec2(12.0, 0.0)).with_max_x(r.right() - if sorted.is_some() { 26.0 } else { 12.0 });
+                        let painter = ui.painter_at(inner);
+                        let (pos, align) = lay.anchor(inner);
+                        painter.text(pos, align, &meta.name, super::medium(opt.font_size), name_color);
+                        if let Some(asc) = sorted {
+                            let ar = Rect::from_center_size(pos2(r.right() - 14.0, r.center().y), vec2(8.0, 8.0));
                             let pts = if asc { vec![ar.left_bottom(), ar.right_bottom(), ar.center_top()] } else { vec![ar.left_top(), ar.right_top(), ar.center_bottom()] };
-                            ui.painter().add(egui::Shape::convex_polygon(pts, pal.accent, Stroke::NONE));
+                            ui.painter().add(egui::Shape::convex_polygon(pts, pal.text_dim, Stroke::NONE));
                         }
                     });
-                    let _ = rect;
+                    let resp = resp.on_hover_text(format!("{} · {}", meta.name, meta.data_type.to_lowercase()));
                     if resp.clicked() {
                         events.push(GridEvent::Sort { col: c, ascending: None, add: shift_held });
                     }
@@ -385,89 +399,91 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
                         RowState::Inserted => pal.inserted,
                         RowState::Deleted => pal.deleted,
                         RowState::Normal if row_selected => pal.grid_selection,
-                        RowState::Normal if opt.alternating && r % 2 == 1 => pal.grid_odd,
-                        RowState::Normal => pal.grid_even,
+                        // Plain rows take the surface they sit on (ground in a tab, surface 1 in a bento tile).
+                        RowState::Normal => egui::Color32::TRANSPARENT,
                     };
-                    if opt.row_numbers {
-                        row.col(|ui| {
-                            let rect = ui.max_rect().expand2(vec2(4.0, 1.0));
-                            ui.painter().rect_filled(rect, CornerRadius::ZERO, if row_selected { pal.grid_selection } else { pal.grid_header });
-                            let label = if state == RowState::Inserted { "+".to_string() } else { (opt.row_offset + r + 1).to_string() };
-                            ui.painter().text(pos2(rect.right() - 8.0, rect.center().y), Align2::RIGHT_CENTER, label, FontId::monospace(opt.font_size - 2.0), pal.text_faint);
-                        });
-                    }
-                    for &c in &visible {
+                    for (vi, &c) in visible.iter().enumerate() {
                         let meta = &cols[c];
+                        let lay = &layouts[c];
                         let is_cursor = st.cursor == Some((r, c));
                         let editing_here = matches!(&st.editing, Some((er, ec, _, _)) if *er == r && *ec == c);
                         let (_, resp) = row.col(|ui| {
                             let rect = ui.max_rect().expand2(vec2(4.0, 1.0));
-                            let bg = if src.cell_modified(r, c) && state == RowState::Normal { pal.modified } else { base_bg };
-                            ui.painter().rect_filled(rect, CornerRadius::ZERO, bg);
-                            ui.painter().line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, pal.grid_separator));
+                            body_clip.get_or_insert(ui.clip_rect());
+                            let modified = src.cell_modified(r, c) && state == RowState::Normal;
+                            ui.painter().rect_filled(rect, CornerRadius::ZERO, if modified { pal.modified } else { base_bg });
+                            // Hairline borders: under each row, and between columns (not after the last).
+                            // Drawn inside the cell's clip: on its edge they were half cut off.
+                            let cell = ui.max_rect();
+                            ui.painter().hline(rect.x_range(), cell.bottom() - 0.5, Stroke::new(1.0, grid_line()));
+                            if vi + 1 < visible.len() {
+                                ui.painter().vline(cell.right() - 0.5, rect.y_range(), Stroke::new(1.0, grid_line()));
+                            }
+                            if vi == 0 && state == RowState::Inserted {
+                                ui.painter().rect_filled(Rect::from_min_size(rect.min, vec2(2.0, rect.height())), CornerRadius::ZERO, pal.text_dim);
+                            }
+                            if modified {
+                                let t = rect.left_top();
+                                ui.painter().add(egui::Shape::convex_polygon(vec![t, t + vec2(6.0, 0.0), t + vec2(0.0, 6.0)], pal.accent, Stroke::NONE));
+                            }
+                            if is_cursor && st.focused {
+                                cursor_rect = Some(rect.shrink(1.0));
+                            }
+                            let text_rect = lay.text_rect(ui, rect, meta.foreign_key);
                             if editing_here {
                                 if let Some((_, _, buf, first)) = &mut st.editing {
                                     let id = opt.id.with(("edit", r, c));
-                                    let te = crate::ui::line_edit(buf).id(id).font(font.clone()).frame(egui::Frame::NONE).desired_width(rect.width() - 8.0).margin(egui::Margin::symmetric(4, 2));
-                                    let out = ui.put(rect.shrink(1.0), te);
+                                    let te = crate::ui::line_edit(buf)
+                                        .id(id)
+                                        .font(lay.font.clone())
+                                        .text_color(lay.color)
+                                        .frame(egui::Frame::NONE)
+                                        .margin(egui::Margin::ZERO)
+                                        .align(if lay.right { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER })
+                                        .desired_width(text_rect.width());
+                                    let out = ui.put(text_rect, te);
                                     if *first {
                                         out.request_focus();
                                         *first = false;
                                     }
                                 }
-                                ui.painter().rect_stroke(rect.shrink(1.0), CornerRadius::same(2), Stroke::new(1.5, pal.accent), egui::StrokeKind::Inside);
+                                cursor_rect = Some(rect.shrink(1.0));
                                 return;
                             }
                             let (text, color, f) = match src.cell(r, c) {
-                                CellView::Value(None) => (opt.null_text.to_string(), pal.grid_placeholder, font.clone()),
-                                CellView::Value(Some(s)) => {
-                                    let color = if is_numeric_type(&meta.data_type) { pal.grid_number } else { pal.grid_text };
-                                    (if s.is_empty() { String::new() } else { first_line(s, 300) }, color, if meta.data_type.contains("json") { mono.clone() } else { font.clone() })
-                                }
-                                CellView::Edited(EditValue::Null) => (opt.null_text.to_string(), pal.grid_placeholder, font.clone()),
-                                CellView::Edited(EditValue::Default) => ("DEFAULT".into(), pal.grid_placeholder, font.clone()),
-                                CellView::Edited(EditValue::Text(s)) => (first_line(s, 300), pal.grid_text, font.clone()),
+                                CellView::Value(None) => (opt.null_text.to_string(), pal.grid_placeholder, mono.clone()),
+                                // An empty string is a value, not NULL: say so in the placeholder style, lowercase so the two never read alike.
+                                CellView::Value(Some("")) => (EMPTY_TEXT.into(), pal.grid_placeholder, mono.clone()),
+                                CellView::Edited(EditValue::Text(s)) if s.is_empty() => (EMPTY_TEXT.into(), pal.grid_placeholder, mono.clone()),
+                                CellView::Value(Some(s)) => (first_line(s, 300), lay.color, lay.font.clone()),
+                                CellView::Edited(EditValue::Null) => (opt.null_text.to_string(), pal.grid_placeholder, mono.clone()),
+                                CellView::Edited(EditValue::Default) => ("DEFAULT".into(), pal.grid_placeholder, mono.clone()),
+                                CellView::Edited(EditValue::Text(s)) => (first_line(s, 300), lay.color, lay.font.clone()),
                             };
-                            let linked = meta.foreign_key && state != RowState::Deleted && matches!(src.cell(r, c), CellView::Value(Some(_)) | CellView::Edited(EditValue::Text(_)));
+                            let linked = meta.foreign_key && state != RowState::Deleted && match src.cell(r, c) { CellView::Value(Some(s)) => !s.is_empty(), CellView::Edited(EditValue::Text(s)) => !s.is_empty(), _ => false };
                             if linked {
-                                let arrow = Rect::from_center_size(pos2(rect.right() - 13.0, rect.center().y), vec2(20.0, rect.height().min(24.0)));
+                                let arrow = Rect::from_center_size(pos2(rect.right() - 14.0, rect.center().y), vec2(20.0, rect.height().min(24.0)));
                                 let response = ui.interact(arrow, opt.id.with(("foreign-key", r, c)), Sense::click());
                                 response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Open referenced row"));
                                 if response.hovered() {
                                     ui.painter().rect_filled(arrow, CornerRadius::same(4), pal.surface_hover);
                                 }
-                                paint_icon(ui.painter(), arrow.shrink2(vec2(5.0, 4.0)), Icon::ChevronRight, pal.accent2);
+                                // ↗: the row this value points at.
+                                let a = Rect::from_center_size(arrow.center(), vec2(9.0, 9.0));
+                                let st = Stroke::new(1.5, super::fk_color());
+                                ui.painter().line_segment([a.left_bottom(), a.right_top()], st);
+                                ui.painter().add(egui::Shape::line(vec![a.left_top() + vec2(2.0, 0.0), a.right_top(), a.right_bottom() - vec2(0.0, 2.0)], st));
                                 if response.on_hover_text("Open referenced row").clicked() {
                                     events.push(GridEvent::FollowForeignKey { row: r, col: c });
                                 }
                             }
-                            let text_rect = rect.with_max_x(rect.right() - if linked { 26.0 } else { 6.0 });
-                            let painter = ui.painter_at(text_rect.shrink2(vec2(6.0, 0.0)));
-                            let pos = pos2(rect.left() + 8.0, rect.center().y);
-                            if let (Some(prof), CellView::Value(Some(v))) = (&meta.profile, src.cell(r, c)) {
-                                if prof.pills && !meta.foreign_key && state != RowState::Deleted {
-                                    if let Some(ci) = prof.category_index(v) {
-                                        let col = category_color(ci);
-                                        let g = ui.painter().layout_no_wrap(v.to_string(), FontId::proportional(opt.font_size - 1.0), super::readable_on_tint(col));
-                                        let pr = Rect::from_min_size(pos2(pos.x, rect.center().y - 10.0), vec2(g.size().x + 16.0, 20.0));
-                                        painter.rect_filled(pr, CornerRadius::same(255), Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), if pal.dark { 36 } else { 30 }));
-                                        painter.galley(pos2(pr.left() + 8.0, pr.center().y - g.size().y / 2.0), g, pal.text);
-                                        if is_cursor && st.focused {
-                                            ui.painter().rect_stroke(rect.shrink(1.0), CornerRadius::same(2), Stroke::new(1.5, pal.grid_selection_border), egui::StrokeKind::Inside);
-                                        }
-                                        return;
-                                    }
-                                }
-                            }
-                            let txt = if state == RowState::Deleted { egui::RichText::new(&text).strikethrough() } else { egui::RichText::new(&text) };
-                            let _ = txt;
-                            painter.text(pos, Align2::LEFT_CENTER, &text, f, color);
+                            let painter = ui.painter_at(text_rect.expand2(vec2(0.0, 4.0)));
+                            let (pos, align) = lay.anchor(text_rect);
+                            let drawn = painter.text(pos, align, &text, f, color);
                             if state == RowState::Deleted {
-                                let w = (text.chars().count() as f32 * opt.font_size * 0.55).min(rect.width() - 14.0);
-                                painter.line_segment([pos2(pos.x, pos.y), pos2(pos.x + w, pos.y)], Stroke::new(1.0, pal.danger));
-                            }
-                            if is_cursor && st.focused {
-                                ui.painter().rect_stroke(rect.shrink(1.0), CornerRadius::same(2), Stroke::new(1.5, pal.grid_selection_border), egui::StrokeKind::Inside);
+                                let w = drawn.width().min(text_rect.width());
+                                let x0 = if lay.right { text_rect.right() - w } else { text_rect.left() };
+                                painter.line_segment([pos2(x0, pos.y), pos2(x0 + w, pos.y)], Stroke::new(1.0, pal.danger));
                             }
                         });
                         if editing_here {
@@ -489,6 +505,8 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
                 });
             });
     });
+
+    paint_cursor_ring(ui, st, cursor_rect, body_clip);
 
     // Finish an inline edit on Enter / focus loss; cancel on Escape.
     if let Some((r, c, buf, first)) = st.editing.clone() {
@@ -517,6 +535,36 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
         }
     }
     events
+}
+
+/// Draws the cell cursor on top of the grid. When it moves to a new cell it glides there over
+/// `motion::FAST`, measured as an offset from the new cell so scrolling never makes it lag.
+fn paint_cursor_ring(ui: &Ui, st: &mut GridState, target: Option<Rect>, clip: Option<Rect>) {
+    let (Some(target), Some(clip)) = (target, clip) else {
+        st.ring_last = None;
+        return;
+    };
+    let now = ui.input(|i| i.time);
+    if st.ring_cell != st.cursor {
+        if let (Some(last), Some(_)) = (st.ring_last, st.ring_cell) {
+            st.ring_from = Some((last.min - target.min, last.size() - target.size(), now));
+        }
+        st.ring_cell = st.cursor;
+    }
+    let mut rect = target;
+    if let Some((dpos, dsize, t0)) = st.ring_from {
+        let t = super::motion::progress(now - t0, super::motion::FAST);
+        if t >= 1.0 {
+            st.ring_from = None;
+        } else {
+            let k = 1.0 - super::motion::ease_out(t);
+            rect = Rect::from_min_size(target.min + dpos * k, target.size() + dsize * k);
+            ui.ctx().request_repaint();
+        }
+    }
+    st.ring_last = Some(target);
+    let color = if st.editing.is_some() { p().accent } else { p().grid_selection_border };
+    ui.painter().with_clip_rect(clip).rect_stroke(rect, CornerRadius::same(2), Stroke::new(1.5, color), egui::StrokeKind::Inside);
 }
 
 fn opts_null_len(opt: &GridOptions) -> usize {
@@ -712,14 +760,25 @@ impl GridSource for ResultSource<'_> {
 }
 
 pub fn result_meta(r: &crate::db::QueryResult) -> Vec<ColMeta> {
-    r.columns.iter().enumerate().map(|(i, n)| ColMeta { name: n.clone(), data_type: r.types.get(i).cloned().unwrap_or_default(), ..Default::default() }).collect()
-}
-
-/// A stable color for the i-th category of a column.
-pub fn category_color(i: usize) -> Color32 {
-    let pal = p();
-    let base = [pal.success, pal.accent2, pal.accent, pal.danger, pal.chart[4], pal.text_dim];
-    base[i % base.len()]
+    r.columns
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let mut data_type = r.types.get(i).cloned().unwrap_or_default();
+            // Untyped results (SQLite expressions): a column whose sampled values are all numbers reads as numeric.
+            if data_type.is_empty() || data_type.eq_ignore_ascii_case("text") && n.contains('(') {
+                let mut seen = 0;
+                let all_numbers = r.rows.iter().take(50).filter_map(|row| row.get(i).cloned().flatten()).all(|v| {
+                    seen += 1;
+                    v.trim().parse::<f64>().is_ok()
+                });
+                if all_numbers && seen > 0 {
+                    data_type = "numeric".into();
+                }
+            }
+            ColMeta { name: n.clone(), data_type, ..Default::default() }
+        })
+        .collect()
 }
 
 /// Sorts a result set locally (query results are not re-queried for sorting).
@@ -748,7 +807,7 @@ mod tests {
 
     fn foreign_key_frame(ctx: &egui::Context, state: &mut GridState, time: f64, events: Vec<egui::Event>) -> Vec<GridEvent> {
         let source = ForeignKeySource { columns: vec![ColMeta { name: "customer_id".into(), data_type: "integer".into(), foreign_key: true, ..Default::default() }] };
-        let options = GridOptions { id: egui::Id::unique("fk-regression"), editable: true, row_numbers: false, alternating: false, null_text: "NULL", font_size: 13.0, row_offset: 0, profiles: false };
+        let options = GridOptions { id: egui::Id::unique("fk-regression"), editable: true, null_text: "NULL", font_size: 13.0, row_height: None };
         let mut result = Vec::new();
         let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 400.0))), time: Some(time), events, ..Default::default() }, |ui| {
             egui::CentralPanel::default().show(ui, |ui| { result = show(ui, &source, state, &options); });

@@ -279,7 +279,7 @@ pub fn show(ui: &mut Ui, g: &Geometry, srid: Option<u32>, height: f32) {
     let pal = p();
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, CornerRadius::same(12), if pal.dark { Color32::from_black_alpha(80) } else { Color32::from_black_alpha(10) });
+    painter.rect_filled(rect, CornerRadius::same(10), if pal.dark { Color32::from_black_alpha(80) } else { Color32::from_black_alpha(10) });
     let inner = rect.shrink(18.0);
     for i in 1..4 {
         let x = inner.left() + inner.width() * i as f32 / 4.0;
