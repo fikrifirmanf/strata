@@ -251,3 +251,32 @@ async fn odbc_transport_live() {
     assert_eq!(fresh.query_one(&format!("SELECT COUNT(*) FROM {q}")).await.unwrap().cell(0,0), Some("1"));
     fresh.execute(&format!("DROP TABLE {q}")).await.unwrap();
 }
+
+/// Read-only: a ClickHouse native port (9000, or a forward to it) is found and read over the
+/// native protocol. Nothing is created, so it can point at a real warehouse.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Requires STRATA_TEST_CH_NATIVE (clickhouse://user:pass@host:native-port/db)"]
+async fn clickhouse_native_live() {
+    let Some(cfg) = cfg("STRATA_TEST_CH_NATIVE") else { return };
+    let (mut d, _) = connect(&cfg).await.expect("connect over the native port");
+    let r = d
+        .query_one("SELECT toInt64(-7) AS i, toDecimal64(-1.5, 2) AS dec, 'it''s' AS s, CAST('b' AS Enum8('a' = 1, 'b' = 2)) AS e, [1, 2] AS arr, ['x'] AS sarr, map('k', 1) AS m, toDate('2026-11-06') AS dt, toDateTime64('2026-11-06 01:02:03.456', 3, 'UTC') AS ts, CAST(NULL AS Nullable(String)) AS n")
+        .await
+        .expect("typed select");
+    assert_eq!(r.columns, ["i", "dec", "s", "e", "arr", "sarr", "m", "dt", "ts", "n"]);
+    let row: Vec<Option<&str>> = r.rows[0].iter().map(|c| c.as_deref()).collect();
+    assert_eq!(row, [Some("-7"), Some("-1.50"), Some("it's"), Some("b"), Some("[1,2]"), Some("['x']"), Some("{'k':1}"), Some("2026-11-06"), Some("2026-11-06 01:02:03.456"), None]);
+    assert_eq!(r.types[1], "Decimal(18, 2)", "real types reach the grid");
+    // Types the native client can't decode fall back to text from the server.
+    let r = d.query_one("SELECT NULL AS nothing, toDate32('1900-01-02') AS d32").await.expect("fallback select");
+    assert_eq!(r.rows[0], vec![None, Some("1900-01-02".to_string())]);
+    let err = d.query_one("SELECT * FROM table_that_does_not_exist_strata").await.unwrap_err().to_string();
+    assert!(err.contains("table_that_does_not_exist_strata") && !err.contains("stack"), "the server message reaches the user: {err}");
+    // The session survives an error.
+    assert_eq!(d.query_one("SELECT 1 AS one").await.unwrap().rows[0][0].as_deref(), Some("1"));
+    let db = d.current_database();
+    let objects = d.objects(&db).await.expect("list tables");
+    eprintln!("{} objects in {db}", objects.len());
+    d.switch_database("system").await.expect("switch database");
+    assert_eq!(d.query_one("SELECT currentDatabase()").await.unwrap().rows[0][0].as_deref(), Some("system"));
+}

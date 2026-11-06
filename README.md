@@ -64,6 +64,8 @@ STRATA_TEST_REDIS=redis://127.0.0.1:6379/0 \
 cargo test live -- --ignored
 ```
 
+`STRATA_TEST_CH_NATIVE=clickhouse://user:pass@host:9000/db` runs a read-only check of the ClickHouse native protocol; it creates nothing, so it can point at a real server.
+
 The ODBC transport integration test also needs `STRATA_TEST_ODBC_DSN` and the PostgreSQL fixture. It tests the adapter through psqlODBC; it does not certify the seven vendor services. These tests create and remove their own objects and databases; use disposable servers with create-database permission.
 
 ### CI and releases
@@ -97,7 +99,7 @@ The launchpad filters saved connections by name, host, database and environment.
 | MySQL, MariaDB | native (mysql_async, text protocol) | multi-statement scripts |
 | SQLite | bundled libsqlite3 | interrupt, `VACUUM INTO` backup |
 | SQL Server | TDS (tiberius) | |
-| ClickHouse | HTTP | edits become `ALTER TABLE … UPDATE/DELETE` mutations |
+| ClickHouse | HTTP, or native TCP when the port is 9000 or forwards to it | edits become `ALTER TABLE … UPDATE/DELETE` mutations |
 | Redis | RESP (redis-rs) | keyspace as a table (key, type, ttl, value); raw commands in the editor |
 | MongoDB | official driver | collections as tables; `db.coll.find({...}).sort().limit()` shell syntax |
 | LibSQL / Turso | Hrana over HTTP | |
