@@ -37,5 +37,8 @@ PLIST
 # first launch needs right-click → Open.
 "$(dirname "$0")/sign.sh" "$app"
 
-hdiutil create -volname "Strata ${version}" -srcfolder "$stage" -ov -format UDZO "dist/Strata-${version}-macos-universal.dmg"
+# hdiutil's own size estimate can come out too small ("No space left on device" on CI runners),
+# so give it the staged size plus headroom.
+size_mb=$(( $(du -sm "$stage" | cut -f1) * 5 / 4 + 32 ))
+hdiutil create -volname "Strata ${version}" -srcfolder "$stage" -size "${size_mb}m" -ov -format UDZO "dist/Strata-${version}-macos-universal.dmg"
 rm -rf "$stage"
