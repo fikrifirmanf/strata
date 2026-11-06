@@ -93,10 +93,10 @@ impl Updates {
         let mut open_popup = None;
         self.about_open = super::dialogs::modal_window(ctx, "About Strata", 420.0, |ui| {
             ui.vertical_centered(|ui| {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(72.0, 72.0), egui::Sense::hover());
+                let (r, _) = ui.allocate_exact_size(egui::vec2(56.0, 56.0), egui::Sense::hover());
                 super::home::paint_logo(ui.painter(), r);
                 ui.add_space(6.0);
-                ui.label(RichText::new("Strata").size(22.0).strong());
+                ui.label(RichText::new("Strata").font(super::display(24.0)));
                 ui.label(dim(format!("Version {}", update::CURRENT)));
                 ui.add_space(6.0);
                 ui.label("A native, cross-platform database workbench written in Rust.");

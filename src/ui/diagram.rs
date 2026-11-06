@@ -2,7 +2,7 @@
 //! layered or circular) with neighbourhood focus; "ER diagram" shows column cards with links.
 
 use super::workspace::{TabCtx, WsAction};
-use super::{dim, faint, mix, p, paint_icon, search_field, segmented, short_count, Icon};
+use super::{dim, mix, p, paint_icon, short_count, Icon};
 use crate::db::{ColumnInfo, DbObject, ObjectKind, Relation, TableStat};
 use crate::runtime::{take, Task};
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, Vec2};
@@ -31,6 +31,8 @@ struct Node {
     pinned: bool,
     /// ER card position.
     card: Pos2,
+    /// ER card width: the widest card in its layout column, so a column lines up.
+    card_w: f32,
 }
 
 struct Loaded {
@@ -139,7 +141,7 @@ impl DiagramTab {
                 // Seed on a spiral so the force layout starts untangled and deterministic.
                 let a = i as f32 * 2.399_963;
                 let r = 40.0 * (i as f32).sqrt() + 20.0;
-                Node { rows: stats.get(&obj.name).and_then(|s| s.rows), obj, cols, pos: pos2(a.cos() * r, a.sin() * r), vel: Vec2::ZERO, pinned: false, card: Pos2::ZERO }
+                Node { rows: stats.get(&obj.name).and_then(|s| s.rows), obj, cols, pos: pos2(a.cos() * r, a.sin() * r), vel: Vec2::ZERO, pinned: false, card: Pos2::ZERO, card_w: NODE_W }
             })
             .collect();
         let index: HashMap<&str, usize> = self.nodes.iter().enumerate().map(|(i, n)| (n.obj.name.as_str(), i)).collect();
@@ -314,15 +316,46 @@ impl DiagramTab {
         }
         let mut levels: Vec<usize> = per.keys().copied().collect();
         levels.sort_unstable();
+        // Each level is a column as wide as its widest card. A tall level wraps into more
+        // columns so a schema with many unlinked tables doesn't become one endless strip.
+        const MAX_COLUMN_H: f32 = 2400.0;
         let mut x = 0.0;
         for l in levels {
+            // Split the level into columns first, then give each column one width.
+            let mut columns: Vec<Vec<usize>> = vec![Vec::new()];
             let mut y = 0.0;
             for &i in &per[&l] {
-                self.nodes[i].card = pos2(x, y);
-                y += Self::card_height(&self.nodes[i]) + 40.0;
+                let h = Self::card_height(&self.nodes[i]);
+                if y > 0.0 && y + h > MAX_COLUMN_H {
+                    columns.push(Vec::new());
+                    y = 0.0;
+                }
+                columns.last_mut().unwrap().push(i);
+                y += h + 32.0;
             }
-            x += NODE_W + 90.0;
+            for (k, col) in columns.iter().enumerate() {
+                let w = col.iter().map(|&i| Self::card_width(&self.nodes[i])).fold(NODE_W, f32::max);
+                let mut y = 0.0;
+                for &i in col {
+                    self.nodes[i].card = pos2(x, y);
+                    self.nodes[i].card_w = w;
+                    y += Self::card_height(&self.nodes[i]) + 32.0;
+                }
+                x += w + if k + 1 < columns.len() { 60.0 } else { 110.0 };
+            }
         }
+    }
+
+    /// Card width from its longest line, so names and types fit side by side (monospace,
+    /// about 0.6 em a character at 12 px). Very long names still end in "…".
+    fn card_width(n: &Node) -> f32 {
+        const CH: f32 = 7.3;
+        let head = n.obj.name.chars().count() as f32 * CH + 20.0 + 48.0;
+        let rows = n.cols.iter().take(18).map(|c| {
+            let ty = super::short_type(&c.data_type).chars().count() + if c.primary_key { 5 } else { 0 };
+            c.name.chars().count() as f32 * CH + 16.0 + ty as f32 * 6.7 + 20.0
+        }).fold(0.0, f32::max);
+        head.max(rows).clamp(NODE_W, 340.0)
     }
 
     fn card_height(n: &Node) -> f32 {
@@ -345,33 +378,36 @@ impl DiagramTab {
                 Err(e) => self.error = Some(format!("{e:#}")),
             }
         }
-        egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 10, bottom: 10 }).show(ui, |ui| {
+        egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 8 }).show(ui, |ui| {
             ui.horizontal(|ui| {
+                ui.set_min_height(32.0);
                 ui.spacing_mut().item_spacing.x = 8.0;
-                let mut m = self.mode;
-                if segmented(ui, &mut m, &[(Mode::Graph, "Graph"), (Mode::Er, "ER diagram")]) {
-                    self.mode = m;
-                    self.fit_pending = true;
-                }
+                let schema = if self.schema.is_empty() { "schema".to_string() } else { self.schema.clone() };
+                ui.label(egui::RichText::new(schema).font(super::mono_medium(13.0)).color(pal.text));
+                let isolated = (0..self.nodes.len()).filter(|&i| self.degree(i) == 0).count();
+                ui.label(egui::RichText::new(format!("{} tables · {} relations{}", self.nodes.len(), self.relations.len(), if isolated > 0 { format!(" · {isolated} unlinked") } else { String::new() })).font(FontId::monospace(12.0)).color(pal.text_faint));
                 if self.mode == Mode::Graph {
                     let mut l = self.layout;
-                    if segmented(ui, &mut l, &[(Layout::Force, "Force"), (Layout::Layers, "Layers"), (Layout::Circle, "Circle")]) {
+                    if super::form::seg_well(ui, &mut l, &[(Layout::Force, "Force"), (Layout::Layers, "Layers"), (Layout::Circle, "Circle")], 0.0) {
                         self.layout = l;
                         self.apply_layout();
                     }
-                    ui.checkbox(&mut self.hide_isolated, "Hide unlinked");
+                    ui.label(egui::RichText::new("Hide unlinked").color(pal.text_dim));
+                    super::form::switch(ui, &mut self.hide_isolated, "Hide unlinked");
                 }
-                let isolated = (0..self.nodes.len()).filter(|&i| self.degree(i) == 0).count();
-                ui.label(faint(format!("{} tables · {} links{}", self.nodes.len(), self.relations.len(), if isolated > 0 { format!(" · {isolated} unlinked") } else { String::new() })));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Export SVG…").clicked() {
+                    if super::btn(ui, "Export SVG", super::BtnKind::Secondary).clicked() {
                         self.export_svg(cx);
                     }
-                    if ui.button("Fit").on_hover_text("Fit everything in view").clicked() {
+                    let mut m = self.mode;
+                    if super::form::seg_well(ui, &mut m, &[(Mode::Er, "ER diagram"), (Mode::Graph, "Graph")], 0.0) {
+                        self.mode = m;
                         self.fit_pending = true;
                     }
-                    let w = 200.0;
-                    let r = search_field(ui, &mut self.search, "Find a table", w);
+                    if super::btn(ui, "Fit", super::BtnKind::Ghost).on_hover_text("Fit everything in view").clicked() {
+                        self.fit_pending = true;
+                    }
+                    let r = super::form::field(ui, &mut self.search, "Find a table", Icon::Search, 200.0);
                     if r.changed() && !self.search.is_empty() {
                         let q = self.search.to_lowercase();
                         if let Some(i) = self.nodes.iter().position(|n| n.obj.name.to_lowercase().contains(&q)) {
@@ -382,7 +418,7 @@ impl DiagramTab {
                 });
             });
         });
-        ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, pal.separator));
+        ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, super::line()));
         if self.task.is_some() {
             ui.centered_and_justified(|ui| ui.add(egui::Spinner::new().size(22.0).color(pal.accent)));
             return;
@@ -410,14 +446,20 @@ impl DiagramTab {
         self.fit_pending = true;
     }
 
+    /// Selects a table by name and shows it at 100% (STRATA_SCRIPT `node:`).
     pub fn select_named(&mut self, name: &str) {
         self.selected = self.nodes.iter().position(|n| n.obj.name == name);
+        if let Some(i) = self.selected {
+            self.zoom = 1.0;
+            self.fit_pending = false;
+            self.center_on(i);
+        }
     }
 
     fn center_on(&mut self, i: usize) {
         let target = match self.mode {
             Mode::Graph => self.nodes[i].pos,
-            Mode::Er => self.nodes[i].card + vec2(NODE_W / 2.0, 40.0),
+            Mode::Er => self.nodes[i].card + vec2(self.nodes[i].card_w / 2.0, 40.0),
         };
         self.pan = -target.to_vec2() * self.zoom;
     }
@@ -427,7 +469,13 @@ impl DiagramTab {
         let n = &self.nodes[i];
         let name = n.obj.name.clone();
         ui.horizontal(|ui| {
-            ui.label(super::title(&name, 15.0));
+            // Long names end in "…" instead of running past the panel; hover shows the full name.
+            let shown = super::home::ellipsize_to(ui.painter(), &name, super::semibold(15.0), ui.available_width() - 32.0);
+            let truncated = shown != name;
+            let label = ui.label(super::title(&shown, 15.0));
+            if truncated {
+                label.on_hover_text(&name);
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if super::icon_button(ui, Icon::Close, "Close").clicked() {
                     self.selected = None;
@@ -630,14 +678,14 @@ impl DiagramTab {
         let pal = p();
         let (canvas, resp) = self.canvas(ui);
         if self.fit_pending {
-            let pts: Vec<(Pos2, Vec2)> = self.nodes.iter().map(|n| (n.card, vec2(NODE_W, Self::card_height(n)))).collect();
+            let pts: Vec<(Pos2, Vec2)> = self.nodes.iter().map(|n| (n.card, vec2(n.card_w, Self::card_height(n)))).collect();
             self.fit(canvas, &pts);
             self.fit_pending = false;
         }
         let z = self.zoom;
         let origin = canvas.center() + self.pan;
         let to_screen = |p: Pos2| origin + p.to_vec2() * z;
-        let node_rect = |n: &Node| Rect::from_min_size(to_screen(n.card), vec2(NODE_W, Self::card_height(n)) * z);
+        let node_rect = |n: &Node| Rect::from_min_size(to_screen(n.card), vec2(n.card_w, Self::card_height(n)) * z);
         if resp.drag_started() {
             let at = resp.interact_pointer_pos().unwrap_or_default();
             self.dragging = self.nodes.iter().rposition(|n| node_rect(n).contains(at));
@@ -676,8 +724,13 @@ impl DiagramTab {
             let p0 = pos2(if from_right { ra.right() } else { ra.left() }, row_y(a, &rel.column));
             let p3 = pos2(if from_right { rb.left() } else { rb.right() }, row_y(b, &rel.ref_column));
             let bend = 60.0 * z * if from_right { 1.0 } else { -1.0 };
-            let lit = focus.as_ref().map(|f| f.contains(&ai) && f.contains(&bi)).unwrap_or(true);
-            let color = if lit { pal.accent2.gamma_multiply(0.75) } else { pal.separator };
+            // Quiet by default so a big schema doesn't turn into a tangle; a selected card
+            // lights its own relations and dims the rest further.
+            let color = match &focus {
+                None => super::line2(),
+                Some(f) if f.contains(&ai) && f.contains(&bi) && (Some(ai) == self.selected || Some(bi) == self.selected) => super::fk_color().gamma_multiply(0.85),
+                Some(_) => super::line().gamma_multiply(0.6),
+            };
             painter.add(egui::epaint::CubicBezierShape::from_points_stroke([p0, p0 + vec2(bend, 0.0), p3 - vec2(bend, 0.0), p3], false, Color32::TRANSPARENT, Stroke::new(1.5, color)));
             painter.circle_filled(p3, 3.0 * z, color);
         }
@@ -688,22 +741,37 @@ impl DiagramTab {
             }
             let lit = focus.as_ref().map(|f| f.contains(&i)).unwrap_or(true);
             let selected = self.selected == Some(i);
-            painter.rect_filled(r.translate(vec2(0.0, 6.0 * z)), CornerRadius::same(14), Color32::from_black_alpha(if lit { 50 } else { 20 }));
-            painter.rect_filled(r, CornerRadius::same(14), pal.content);
-            painter.rect_stroke(r, CornerRadius::same(14), Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { pal.accent } else { pal.glass_stroke }), egui::StrokeKind::Inside);
+            // Card: s1 with a hairline edge; header row in mono with the row count; keys keep their colours.
+            let fade = if lit { 1.0 } else { 0.45 };
+            painter.rect_filled(r, CornerRadius::same(6), pal.sidebar);
+            painter.rect_stroke(r, CornerRadius::same(6), Stroke::new(if selected { 1.5 } else { 1.0 }, if selected { pal.grid_selection_border } else { super::line2() }), egui::StrokeKind::Inside);
             let head = Rect::from_min_size(r.min, vec2(r.width(), HEAD_H * z));
-            painter.rect_filled(head, CornerRadius { nw: 14, ne: 14, sw: 0, se: 0 }, mix(pal.content, pal.accent, if lit { 0.14 } else { 0.04 }));
-            let text_c = if lit { pal.text } else { pal.text_faint };
-            painter.text(head.left_center() + vec2(12.0 * z, 0.0), Align2::LEFT_CENTER, &n.obj.name, super::semibold(13.0 * z), text_c);
-            if let Some(rows) = n.rows {
-                painter.text(head.right_center() - vec2(12.0 * z, 0.0), Align2::RIGHT_CENTER, short_count(rows), FontId::monospace(10.5 * z), pal.text_faint);
+            painter.hline(head.x_range(), head.bottom(), Stroke::new(1.0, super::line()));
+            let count = n.rows.map(short_count).unwrap_or_default();
+            let count_font = FontId::monospace(12.0 * z);
+            let count_w = if count.is_empty() { 0.0 } else { painter.layout_no_wrap(count.clone(), count_font.clone(), pal.text_faint).size().x + 12.0 * z };
+            let title = super::home::ellipsize_to(&painter, &n.obj.name, super::mono_medium(12.0 * z), r.width() - 20.0 * z - count_w);
+            painter.text(head.left_center() + vec2(10.0 * z, 0.0), Align2::LEFT_CENTER, title, super::mono_medium(12.0 * z), pal.text.gamma_multiply(fade));
+            if !count.is_empty() {
+                painter.text(head.right_center() - vec2(10.0 * z, 0.0), Align2::RIGHT_CENTER, count, count_font, pal.text_faint.gamma_multiply(fade));
             }
+            let (name_font, type_font) = (FontId::monospace(12.0 * z), FontId::monospace(11.0 * z));
+            let inner = r.width() - 20.0 * z;
             for (k, c) in n.cols.iter().take(18).enumerate() {
                 let y = r.top() + (HEAD_H + 4.0 + k as f32 * ROW_H + ROW_H / 2.0) * z;
-                let name_color = if !lit { pal.text_faint } else if c.primary_key { pal.accent } else { pal.text_dim };
-                painter.text(pos2(r.left() + 12.0 * z, y), Align2::LEFT_CENTER, &c.name, FontId::proportional(11.5 * z), name_color);
-                let ty: String = c.data_type.chars().take(16).collect();
-                painter.text(pos2(r.right() - 12.0 * z, y), Align2::RIGHT_CENTER, ty, FontId::monospace(10.0 * z), pal.text_faint);
+                let is_fk = self.relations.iter().any(|rel| rel.table == n.obj.name && rel.column == c.name);
+                let name_color = if c.primary_key { super::pk_color() } else if is_fk { super::fk_color() } else { pal.text };
+                // The name gets the room first; the type takes what is left, ending in "…".
+                let name_w = painter.layout_no_wrap(c.name.clone(), name_font.clone(), pal.text).size().x;
+                let key = if c.primary_key { "PK · " } else if is_fk { "FK · " } else { "" };
+                let ty_room = inner - name_w.min(inner * 0.62) - 14.0 * z;
+                let ty = if ty_room < 30.0 * z { String::new() } else { super::home::ellipsize_to(&painter, &format!("{key}{}", super::short_type(&c.data_type)), type_font.clone(), ty_room) };
+                let ty_w = if ty.is_empty() { 0.0 } else { painter.layout_no_wrap(ty.clone(), type_font.clone(), pal.text_faint).size().x + 14.0 * z };
+                let name = super::home::ellipsize_to(&painter, &c.name, name_font.clone(), inner - ty_w);
+                painter.text(pos2(r.left() + 10.0 * z, y), Align2::LEFT_CENTER, name, name_font.clone(), name_color.gamma_multiply(fade));
+                if !ty.is_empty() {
+                    painter.text(pos2(r.right() - 10.0 * z, y), Align2::RIGHT_CENTER, ty, type_font.clone(), pal.text_faint.gamma_multiply(fade));
+                }
             }
             if n.cols.len() > 18 {
                 let y = r.top() + (HEAD_H + 4.0 + 18.0 * ROW_H + ROW_H / 2.0) * z;

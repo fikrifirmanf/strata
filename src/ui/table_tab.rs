@@ -162,6 +162,10 @@ pub struct TableTab {
     /// Linked rows for the inspected row: (row index + page offset, links).
     linked: Option<(usize, Vec<LinkInfo>)>,
     linked_task: Option<(usize, Task<anyhow::Result<Vec<LinkInfo>>>)>,
+    /// The toolbar's quick "contains" filter over every column.
+    quick_filter: String,
+    /// Row height: compact 26, cozy 32, roomy 40.
+    density: u8,
 }
 
 /// A row this row points at, or a set of rows pointing at it.
@@ -213,6 +217,8 @@ impl TableTab {
             table_stats: None,
             linked: None,
             linked_task: None,
+            quick_filter: String::new(),
+            density: 1,
         }
     }
 
@@ -641,44 +647,70 @@ impl TableTab {
         let pal = p();
         let editable = self.editable(cx.session.cfg.read_only);
 
-        let compact_toolbar = ui.available_width() < 760.0;
-        // Keep view navigation and row actions distinct when the data panel is narrow.
-        egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 10, bottom: 10 }).show(ui, |ui| {
+        // Toolbar: name and count, the view switch, the row filter, density; row actions on the right.
+        egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 8 }).show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.spacing_mut().item_spacing = vec2(12.0, 8.0);
+                ui.set_min_height(32.0);
+                ui.label(RichText::new(&self.obj.name).font(super::mono_medium(14.0)).color(pal.text));
                 if self.obj.kind.has_rows() {
+                    let shown = self.data.rows.len();
+                    let meta = match self.count {
+                        Some(t) if t as usize == shown && self.req.offset == 0 => format!("{} rows", fmt_count(t)),
+                        Some(t) => format!("{}–{} of {} rows", fmt_count((self.req.offset + 1) as u64), fmt_count((self.req.offset + shown) as u64), fmt_count(t)),
+                        None => format!("{shown} rows"),
+                    };
+                    ui.label(RichText::new(meta).font(egui::FontId::monospace(12.0)).color(pal.text_faint));
                     let mut v = self.view;
                     let mut views = vec![(TableView::Data, "Data"), (TableView::Structure, "Structure")];
                     if self.obj.kind == ObjectKind::Table && !matches!(cx.session.dialect(), crate::model::Dialect::Redis | crate::model::Dialect::Elastic) {
                         views.push((TableView::Relations, "Relations"));
                     }
                     views.push((TableView::Profile, "Profile"));
-                    if segmented(ui, &mut v, &views) {
+                    if super::form::seg_well(ui, &mut v, &views, 0.0) {
                         self.view = v;
                     }
-                    ui.add_space(6.0);
                 }
-                if self.view != TableView::Data && icon_button(ui, Icon::Refresh, "Reload structure").clicked() {
+                if self.view == TableView::Data && self.obj.kind.has_rows() {
+                    let r = super::form::field(ui, &mut self.quick_filter, "Filter rows", Icon::Filter, 220.0);
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        let q = self.quick_filter.trim().to_string();
+                        self.req.filters.retain(|f| !(f.column.is_none() && f.op == FilterOp::Contains));
+                        if !q.is_empty() {
+                            self.req.filters.push(Filter { column: None, op: FilterOp::Contains, value: q, enabled: true, ..Default::default() });
+                        }
+                        self.req.offset = 0;
+                        self.draft_filters = self.req.filters.clone();
+                        self.reload(cx);
+                    }
+                    let advanced = self.req.filters.iter().any(|f| f.enabled && !(f.column.is_none() && f.op == FilterOp::Contains));
+                    if super::tool_button(ui, Icon::Filter, "Filter by column (⌘F)", self.filters_open || advanced).clicked() {
+                        self.toggle_filters();
+                    }
+                } else if icon_button(ui, Icon::Refresh, "Reload structure").clicked() {
                     self.load_meta(cx);
                 }
-                if self.view == TableView::Data && !self.req.filters.iter().any(|f| f.enabled) {
-                    self.filter_tokens_ui(ui, cx);
-                }
-                if !compact_toolbar {
-                    self.row_actions_ui(ui, cx, editable);
-                }
                 if self.is_busy() {
-                    ui.add(egui::Spinner::new().size(14.0).color(pal.accent));
+                    ui.add(egui::Spinner::new().size(14.0).color(pal.text_dim));
+                }
+                if self.view == TableView::Data && self.obj.kind.has_rows() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let mut d = self.density;
+                        super::form::seg_well(ui, &mut d, &[(0, "Compact"), (1, "Cozy"), (2, "Roomy")], 0.0);
+                        self.density = d;
+                        ui.add_space(8.0);
+                        self.row_actions_ui(ui, cx, editable);
+                    });
                 }
             });
-            if self.view == TableView::Data && self.req.filters.iter().any(|f| f.enabled) {
+            if self.view == TableView::Data && self.req.filters.iter().any(|f| f.enabled && !(f.column.is_none() && f.op == FilterOp::Contains)) {
+                ui.add_space(8.0);
                 ui.horizontal_wrapped(|ui| self.filter_tokens_ui(ui, cx));
             }
-            if compact_toolbar && self.view == TableView::Data {
-                ui.horizontal(|ui| self.row_actions_ui(ui, cx, editable));
-            }
         });
-        ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, pal.separator));
+        ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, super::line()));
 
         if self.view == TableView::Data && self.filters_open {
             self.filters_ui(ui, cx);
@@ -704,27 +736,21 @@ impl TableTab {
     }
 
     fn row_actions_ui(&mut self, ui: &mut Ui, cx: &mut TabCtx, editable: bool) {
-        let pal = p();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    if self.view == TableView::Data && self.obj.kind.has_rows() {
-                        if ui.add(egui::Button::new(RichText::new("Export").size(12.5)).fill(Color32::TRANSPARENT).stroke(Stroke::new(1.0, pal.border)).corner_radius(CornerRadius::same(10)).min_size(vec2(0.0, 30.0))).clicked() {
-                            cx.actions.push(WsAction::ExportTable(self.table(), self.req.clone()));
-                        }
-                        if editable {
-                            if icon_button(ui, Icon::Trash, "Delete selected rows (⌫)").clicked() {
-                                self.delete_selected();
-                            }
-                            if icon_button(ui, Icon::Plus, "Insert row (⌘I)").clicked() {
-                                self.insert_row();
-                            }
-                        }
-                        if icon_button(ui, Icon::Refresh, "Reload (⌘R)").clicked() {
-                            self.reload(cx);
-                        }
-                        self.pager_ui(ui, cx);
-                    }
-                });
+        if super::tool_button(ui, Icon::Export, "Export rows", false).clicked() {
+            cx.actions.push(WsAction::ExportTable(self.table(), self.req.clone()));
+        }
+        if editable {
+            if super::tool_button(ui, Icon::Trash, "Delete selected rows (⌫)", false).clicked() {
+                self.delete_selected();
+            }
+            if super::tool_button(ui, Icon::Plus, "Insert row (⌘I)", false).clicked() {
+                self.insert_row();
+            }
+        }
+        if super::tool_button(ui, Icon::Refresh, "Reload (⌘R)", false).clicked() {
+            self.reload(cx);
+        }
+        self.pager_ui(ui, cx);
     }
 
     /// Applied filters as tokens; clicking one (or "+ Filter") opens the editor.
@@ -942,7 +968,8 @@ impl TableTab {
                                     for (i, height) in profile.bars.iter().enumerate() {
                                         let x = rect.left() + i as f32 * (width + gap);
                                         let y = rect.bottom() - (height * rect.height()).max(2.0);
-                                        let color = if profile.kind == grid::ProfileKind::Categorical { grid::category_color(i) } else { pal.accent2.gamma_multiply(0.8) };
+                                        // One measure, one hue: the bars differ by height, not by colour.
+                                        let color = pal.chart[0];
                                         ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(x, y), egui::pos2(x + width, rect.bottom())), CornerRadius::same(2), color);
                                     }
                                     response.on_hover_text(format!("{} · {} distinct values in the loaded page", meta.name, fmt_count(profile.distinct as u64)));
@@ -951,7 +978,7 @@ impl TableTab {
                                             for (i, (value, count)) in profile.categories.iter().take(3).enumerate() {
                                                 ui.horizontal(|ui| {
                                                     let (dot, _) = ui.allocate_exact_size(vec2(7.0, 7.0), egui::Sense::hover());
-                                                    ui.painter().circle_filled(dot.center(), 3.0, grid::category_color(i));
+                                                    ui.painter().circle_filled(dot.center(), 3.0, pal.chart[0].gamma_multiply(1.0 - i as f32 * 0.25));
                                                     ui.label(RichText::new(grid::first_line(value, 14)).size(10.5));
                                                     ui.label(faint(count.to_string()).size(10.0));
                                                 });
@@ -1023,6 +1050,9 @@ impl TableTab {
         let shown = self.data.rows.len();
         let total = self.count;
         let next_enabled = shown >= self.req.limit && total.map(|t| (self.req.offset + shown) < t as usize).unwrap_or(true);
+        if !next_enabled && self.req.offset == 0 {
+            return;
+        }
         ui.add_enabled_ui(next_enabled, |ui| {
             if icon_button(ui, Icon::ChevronRight, "Next page").clicked() {
                 self.req.offset += self.req.limit;
@@ -1035,9 +1065,6 @@ impl TableTab {
                 self.reload(cx);
             }
         });
-        let range = if shown == 0 { "0 rows".to_string() } else { format!("{}–{}", self.req.offset + 1, self.req.offset + shown) };
-        let of = total.map(|t| format!(" of {}", fmt_count(t))).unwrap_or_default();
-        ui.label(RichText::new(format!("{range}{of}")).font(egui::FontId::monospace(12.0)).color(pal_text_dim()));
     }
 
     fn filters_ui(&mut self, ui: &mut Ui, cx: &mut TabCtx) {
@@ -1126,12 +1153,9 @@ impl TableTab {
         let opts = grid::GridOptions {
             id: egui::Id::unique(("table-grid", self.id)),
             editable,
-            row_numbers: cx.settings.show_row_numbers,
-            alternating: cx.settings.alternating_rows,
             null_text: &cx.settings.null_display,
             font_size: cx.settings.grid_font_size,
-            row_offset: self.req.offset,
-            profiles: cx.settings.column_profiles,
+            row_height: Some([26.0, 32.0, 40.0][self.density.min(2) as usize]),
         };
         let mut grid_state = std::mem::take(&mut self.grid);
         let src = TableSource { tab: self };
@@ -1768,11 +1792,7 @@ impl TableTab {
         };
         let edited = (0..n).any(|c| src.cell_modified(r, c));
         ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                super::section_label(ui, &format!("{} · row", self.obj.name));
-                ui.label(RichText::new(format!("#{pk_text}")).font(egui::FontId::monospace(19.0)).color(pal.text));
-            });
+            ui.label(RichText::new(format!("Row {pk_text}")).font(super::medium(13.0)).color(pal.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 let (label, tone) = match state {
                     RowState::Inserted => ("new", pal.success),
@@ -1790,16 +1810,29 @@ impl TableTab {
         let mut edits = Vec::new();
         let mut quick = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             for c in 0..n {
                 let meta = self.grid_meta[c].clone();
                 let src = TableSource { tab: self };
                 let value = grid::cell_value(&src, r, c);
                 let modified = src.cell_modified(r, c);
                 let original = if modified { self.data.rows.get(r).and_then(|row| row.get(c)).cloned().flatten() } else { None };
+                // Field: a hairline, the name in mono (keys in their colours), the value under it.
+                let top = ui.cursor().top();
+                ui.painter().hline(ui.max_rect().x_range(), top + 0.5, Stroke::new(1.0, super::line()));
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&meta.name).size(12.0).color(pal.text_dim));
-                    ui.label(RichText::new(meta.data_type.to_lowercase()).font(egui::FontId::monospace(10.5)).color(pal.text_faint));
+                    let name_color = if meta.primary_key { super::pk_color() } else if meta.foreign_key { super::fk_color() } else { pal.text_faint };
+                    ui.label(RichText::new(&meta.name).font(egui::FontId::monospace(12.0)).color(name_color));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if modified {
+                            ui.label(RichText::new("edited").font(egui::FontId::monospace(12.0)).color(pal.accent));
+                        } else {
+                            ui.label(RichText::new(meta.data_type.to_lowercase()).font(egui::FontId::monospace(12.0)).color(pal.text_faint));
+                        }
+                    });
                 });
+                ui.add_space(2.0);
                 let json = value.as_deref().and_then(super::json_tree::parse_json);
                 let geo = if json.is_none() { value.as_deref().filter(|_| looks_spatial(&meta.data_type) || value.as_deref().map(|v| v.len() >= 42).unwrap_or(false)).and_then(super::geo::parse) } else { None };
                 if modified {
@@ -1809,7 +1842,7 @@ impl TableTab {
                         ui.label(RichText::new(value.as_deref().unwrap_or("NULL")).font(egui::FontId::monospace(12.0)).color(super::readable_on_tint(pal.accent)));
                     });
                 } else if let Some(mut j) = json {
-                    egui::Frame::new().fill(if pal.dark { Color32::from_black_alpha(70) } else { Color32::from_black_alpha(8) }).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                    egui::Frame::new().fill(if pal.dark { Color32::from_black_alpha(70) } else { Color32::from_black_alpha(8) }).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         super::json_tree::show(ui, &mut j, false, egui::Id::unique(("inspect-json", self.id, c)));
                     });
@@ -1823,7 +1856,7 @@ impl TableTab {
                     let mut text = value.clone().unwrap_or_default();
                     let multiline = text.len() > 48 || text.contains('\n');
                     let te = if multiline { egui::TextEdit::multiline(&mut text).desired_rows(3) } else { crate::ui::line_edit(&mut text) };
-                    let te = te.font(egui::FontId::monospace(12.5)).desired_width(f32::INFINITY).hint_text(faint(cx.settings.null_display.clone()).italics()).interactive(editable && state != RowState::Deleted);
+                    let te = te.font(egui::FontId::monospace(13.0)).frame(egui::Frame::NONE).margin(egui::Margin::ZERO).text_color(if meta.foreign_key { super::fk_color() } else { pal.text }).desired_width(f32::INFINITY).hint_text(RichText::new(cx.settings.null_display.clone()).font(egui::FontId::monospace(13.0)).color(pal.text_faint)).interactive(editable && state != RowState::Deleted);
                     let resp = ui.add(te);
                     if resp.changed() {
                         edits.push((c, text));
@@ -1841,46 +1874,33 @@ impl TableTab {
                         });
                     }
                 }
-                ui.add_space(10.0);
+                ui.add_space(8.0);
             }
             let links = self.linked.as_ref().filter(|(k, _)| *k == r + self.req.offset).map(|(_, l)| l.clone()).unwrap_or_default();
             if !self.fks.is_empty() || !self.incoming.is_empty() {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label(super::title("Linked rows", 13.0));
+                    ui.label(RichText::new("Linked rows").font(super::medium(13.0)).color(pal.text));
                     if self.linked_task.is_some() {
                         ui.add(egui::Spinner::new().size(12.0).color(pal.accent));
                     }
                 });
                 ui.add_space(6.0);
                 for l in links {
-                    let resp = egui::Frame::new()
-                        .fill(if pal.dark { Color32::from_white_alpha(6) } else { Color32::from_black_alpha(5) })
-                        .stroke(Stroke::new(1.0, pal.glass_stroke))
-                        .corner_radius(CornerRadius::same(12))
-                        .inner_margin(egui::Margin::symmetric(10, 8))
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(if l.outgoing { "→" } else { "←" }).font(egui::FontId::monospace(13.0)).color(pal.accent2));
-                                ui.vertical(|ui| {
-                                    ui.spacing_mut().item_spacing.y = 1.0;
-                                    ui.label(RichText::new(&l.table).font(super::medium(13.0)));
-                                    ui.label(RichText::new(&l.detail).size(11.5).color(pal.text_dim));
-                                });
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let (rr, _) = ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
-                                    paint_icon(ui.painter(), rr, Icon::ChevronRight, pal.text_faint);
-                                });
-                            });
-                        })
-                        .response
-                        .interact(egui::Sense::click())
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if resp.clicked() {
+                    let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), egui::Sense::click());
+                    let h = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), super::motion::FAST as f32);
+                    ui.painter().hline(rr.x_range(), rr.top() + 0.5, Stroke::new(1.0, super::line()));
+                    if h > 0.0 {
+                        ui.painter().rect_filled(rr, CornerRadius::same(4), pal.surface.gamma_multiply(h));
+                    }
+                    let arrow = if l.outgoing { "→" } else { "←" };
+                    ui.painter().text(egui::pos2(rr.left() + 4.0, rr.top() + 12.0), egui::Align2::LEFT_CENTER, format!("{arrow} {}", l.table), egui::FontId::monospace(13.0), super::fk_color());
+                    let detail = super::home::ellipsize_to(ui.painter(), &l.detail, egui::FontId::proportional(12.0), rr.width() - 28.0);
+                    ui.painter().text(egui::pos2(rr.left() + 4.0, rr.top() + 31.0), egui::Align2::LEFT_CENTER, detail, egui::FontId::proportional(12.0), pal.text_dim);
+                    super::home::paint_chevron(ui.painter(), egui::Rect::from_center_size(egui::pos2(rr.right() - 10.0, rr.center().y), vec2(12.0, 12.0)), 0.0, pal.text_faint);
+                    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                         cx.actions.push(WsAction::OpenTableFiltered { table: TableRef { schema: l.schema.clone(), name: l.table.clone() }, column: l.column.clone(), value: Some(l.value.clone()) });
                     }
-                    ui.add_space(6.0);
                 }
             }
         });
@@ -1999,10 +2019,6 @@ fn type_picker(ui: &mut Ui, value: &mut String, width: f32, groups: &[(&str, &[&
         field
     })
     .inner
-}
-
-fn pal_text_dim() -> Color32 {
-    p().text_dim
 }
 
 pub fn fmt_count(n: u64) -> String {

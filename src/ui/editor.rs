@@ -133,7 +133,9 @@ pub fn highlight(text: &str, font: FontId, current: Option<(usize, usize)>) -> L
             Some((cs, ce)) if s >= cs && e <= ce => pal.editor_current_query,
             _ => Color32::TRANSPARENT,
         };
-        job.append(&text[s..e], 0.0, TextFormat { font_id: font.clone(), color, background, italics: t == Tok::Comment, ..Default::default() });
+        // Keywords stand out by weight, not colour; Spline Sans Mono Medium keeps the same advance.
+        let font_id = if t == Tok::Keyword { super::mono_medium(font.size) } else { font.clone() };
+        job.append(&text[s..e], 0.0, TextFormat { font_id, color, background, italics: t == Tok::Comment, ..Default::default() });
     }
     job
 }

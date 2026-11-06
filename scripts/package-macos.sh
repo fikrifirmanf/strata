@@ -32,8 +32,10 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-# Ad-hoc signature: required on Apple silicon. Not notarized, so first launch needs right-click → Open.
-codesign --force --deep --sign - "$app"
+# Signed with "Strata Local Signing" when this Mac has it (scripts/setup-signing.sh), so updates
+# keep keychain access; ad-hoc otherwise (required on Apple silicon). Not notarized, so the
+# first launch needs right-click → Open.
+"$(dirname "$0")/sign.sh" "$app"
 
 hdiutil create -volname "Strata ${version}" -srcfolder "$stage" -ov -format UDZO "dist/Strata-${version}-macos-universal.dmg"
 rm -rf "$stage"
