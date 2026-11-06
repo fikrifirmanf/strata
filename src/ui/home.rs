@@ -885,7 +885,8 @@ fn editor_body(ui: &mut egui::Ui, ed: &mut ConnEditor, conns: &ConnectionFile) {
             let mut browse_db = false;
             let note = match c.driver {
                 d if d.is_odbc() => "Configure the DSN in your ODBC administrator with the server, TLS and authentication settings. Passwords are stored in the system keychain.",
-                DriverKind::ClickHouse | DriverKind::Elasticsearch => "Connects over HTTP. With SSL on, Strata uses HTTPS on the same port.",
+                DriverKind::ClickHouse => "Use the HTTP port (8123) or the native port (9000); Strata detects which one it reached, also through a forwarded port. With SSL on, it encrypts on the same port.",
+                DriverKind::Elasticsearch => "Connects over HTTP. With SSL on, Strata uses HTTPS on the same port.",
                 DriverKind::MongoDb if c.mongo_uri() => "Port, user, password and TLS are read from the URI.",
                 _ => "",
             };
