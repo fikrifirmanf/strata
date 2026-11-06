@@ -194,6 +194,17 @@ pub fn schemas_sql(d: Dialect) -> Option<&'static str> {
     }
 }
 
+/// Read one database's namespaces without issuing USE or changing the session context.
+pub fn sqlserver_completion_sql(database: &str) -> String {
+    let database = sqlgen::quote_ident(Dialect::SqlServer, database);
+    // unslop-ignore NO_SQL_INTERPOLATION -- The database identifier is escaped by quote_ident.
+    format!("SELECT s.name, o.name, c.name FROM {database}.sys.schemas AS s \
+        LEFT JOIN {database}.sys.objects AS o ON o.schema_id = s.schema_id AND o.type IN ('U','V') AND o.is_ms_shipped = 0 \
+        LEFT JOIN {database}.sys.columns AS c ON c.object_id = o.object_id \
+        WHERE s.name NOT IN ('guest','INFORMATION_SCHEMA','sys') AND s.name NOT LIKE 'db\\_%' ESCAPE '\\' \
+        ORDER BY CASE WHEN s.name = 'dbo' THEN 0 ELSE 1 END, s.name, o.name, c.column_id")
+}
+
 /// Each query returns (name, type?) rows. A fixed kind means the second column is ignored.
 pub fn objects_sql(d: Dialect, schema: &str, db: &str) -> Vec<(String, Option<ObjectKind>)> {
     let s = lit(d, schema);
@@ -675,6 +686,16 @@ pub fn users_sql(d: Dialect) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sqlserver_completion_reads_quoted_database_metadata_without_switching() {
+        let sql = sqlserver_completion_sql("sales] archive");
+        assert!(sql.starts_with("SELECT s.name, o.name, c.name FROM [sales]] archive].sys.schemas"));
+        assert!(sql.contains("LEFT JOIN [sales]] archive].sys.objects"));
+        assert!(sql.contains("LEFT JOIN [sales]] archive].sys.columns"));
+        assert!(!sql.contains("USE "));
+        assert!(!sql.contains("SELECT *"));
+    }
 
     #[test]
     fn parses_column_flags_across_boolean_spellings() {

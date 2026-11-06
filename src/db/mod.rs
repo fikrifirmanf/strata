@@ -35,6 +35,10 @@ pub struct QueryResult {
     pub message: Option<String>,
     pub elapsed_ms: u64,
     pub sql: String,
+    /// A server-side read cursor with another batch available on this connection.
+    pub cursor: Option<i32>,
+    /// Keeps an incremental result owned while it is queued or displayed.
+    pub cursor_owner: Option<Arc<()>>,
 }
 
 impl QueryResult {
@@ -326,6 +330,17 @@ pub trait Driver: Send {
     /// Runs one or more statements and returns one result per statement.
     async fn execute(&mut self, sql: &str) -> Result<Vec<QueryResult>>;
 
+    /// Return the initial editor batch, retaining a cursor when more rows are available.
+    async fn execute_paged(&mut self, sql: &str, _page_size: usize) -> Result<Vec<QueryResult>> {
+        self.execute(sql).await
+    }
+
+    async fn fetch_page(&mut self, _cursor: i32, _page_size: usize) -> Result<QueryResult> {
+        anyhow::bail!("This driver has no open result cursor")
+    }
+
+    async fn close_cursor(&mut self, _cursor: i32) -> Result<()> { Ok(()) }
+
     async fn switch_database(&mut self, db: &str) -> Result<()>;
 
     async fn server_version(&mut self) -> Result<String> {
@@ -573,8 +588,8 @@ pub fn split_statements(sql: &str) -> Vec<(usize, usize)> {
     let mut i = 0;
     while i < b.len() {
         match b[i] {
-            b'\'' | b'"' | b'`' => {
-                let q = b[i];
+            b'\'' | b'"' | b'`' | b'[' => {
+                let q = if b[i] == b'[' { b']' } else { b[i] };
                 i += 1;
                 while i < b.len() {
                     if b[i] == b'\\' && q == b'\'' {

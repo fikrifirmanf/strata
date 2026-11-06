@@ -11,6 +11,70 @@ use crate::query_transaction::{self, ManagedQuery, TransactionState};
 use crate::runtime::{take, Task};
 use egui::{vec2, Color32, CornerRadius, RichText, Stroke, Ui};
 
+#[derive(Clone)]
+enum PageConnection {
+    Managed(ManagedQuery),
+    Shared(std::sync::Arc<crate::runtime::Session>),
+}
+
+impl PageConnection {
+    async fn run(&self, sql: &str, timeout: u64, page_size: usize) -> anyhow::Result<LoadedResults> {
+        let results = match self {
+            Self::Managed(query) => query.execute_paged(sql, timeout, page_size).await?,
+            Self::Shared(session) => {
+                let mut driver = session.driver.lock().await;
+                if timeout > 0 {
+                    tokio::time::timeout(std::time::Duration::from_secs(timeout), driver.execute_paged(sql, page_size))
+                        .await.map_err(|_| anyhow::anyhow!("Query timed out after {timeout} seconds"))??
+                } else { driver.execute_paged(sql, page_size).await? }
+            }
+        };
+        Ok(LoadedResults { results, connection: self.clone(), page_size })
+    }
+
+    async fn fetch(&self, cursor: i32, page_size: usize, timeout: u64) -> anyhow::Result<QueryResult> {
+        match self {
+            Self::Managed(query) => query.fetch_page(cursor, page_size, timeout).await,
+            Self::Shared(session) => {
+                let mut driver = session.driver.lock().await;
+                if timeout > 0 {
+                    tokio::time::timeout(std::time::Duration::from_secs(timeout), driver.fetch_page(cursor, page_size))
+                        .await.map_err(|_| anyhow::anyhow!("Loading more rows timed out"))?
+                } else { driver.fetch_page(cursor, page_size).await }
+            }
+        }
+    }
+
+    fn close_later(&self, cursor: i32) {
+        let connection = self.clone();
+        crate::runtime::rt().spawn(async move {
+            let cleanup = async move {
+                match connection {
+                    Self::Managed(query) => query.close_cursor(cursor).await,
+                    Self::Shared(session) => session.driver.lock().await.close_cursor(cursor).await,
+                }
+            };
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), cleanup).await;
+        });
+    }
+}
+
+struct ResultCursor { id: i32, connection: PageConnection }
+
+impl Drop for ResultCursor {
+    fn drop(&mut self) { self.connection.close_later(self.id); }
+}
+
+struct LoadedResults { results: Vec<QueryResult>, connection: PageConnection, page_size: usize }
+
+impl Drop for LoadedResults {
+    fn drop(&mut self) {
+        for result in &self.results {
+            if let Some(cursor) = result.cursor { self.connection.close_later(cursor); }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellView {
     Table,
@@ -30,6 +94,10 @@ pub struct ResultView {
     pub collapsed: bool,
     pub chart: Option<ChartSpec>,
     pub plan: Vec<PlanNode>,
+    cursor: Option<ResultCursor>,
+    page_task: Option<Task<anyhow::Result<QueryResult>>>,
+    page_error: Option<String>,
+    page_size: usize,
 }
 
 /// A label column plus numeric series, when the rows chart well.
@@ -52,14 +120,15 @@ pub struct PlanNode {
 }
 
 impl ResultView {
-    fn new(result: QueryResult, dialect: Dialect) -> Self {
+    fn new(result: QueryResult, dialect: Dialect, connection: PageConnection, page_size: usize) -> Self {
+        let cursor = result.cursor.map(|id| ResultCursor { id, connection });
         let rows = result.rows.clone();
         let mut meta = grid::result_meta(&result);
         grid::profile_all(&mut meta, &rows);
         let plan = parse_plan(&result, dialect);
         let chart = chart_spec(&meta, rows.len());
         let view = if !plan.is_empty() { CellView::Plan } else { CellView::Table };
-        Self { result, rows, grid: GridState::default(), sort: vec![], meta, view, collapsed: false, chart, plan }
+        Self { result, rows, grid: GridState::default(), sort: vec![], meta, view, collapsed: false, chart, plan, cursor, page_task: None, page_error: None, page_size }
     }
 }
 
@@ -132,7 +201,7 @@ pub struct QueryTab {
     pub results: Vec<ResultView>,
     /// Statements that returned no rows: (ok, text).
     pub messages: Vec<(bool, String)>,
-    task: Option<Task<anyhow::Result<Vec<QueryResult>>>>,
+    task: Option<Task<anyhow::Result<LoadedResults>>>,
     pub auto_commit: bool,
     managed: Option<ManagedQuery>,
     finish_task: Option<Task<anyhow::Result<()>>>,
@@ -190,6 +259,7 @@ impl QueryTab {
     pub fn finish_transaction(&mut self, ctx: &egui::Context, commit: bool) {
         if self.transaction_busy() { return; }
         let Some(query) = self.managed.clone() else { return };
+        self.stop_paging();
         self.transaction_error = None;
         self.finish_message = if commit { "Transaction committed" } else { "Transaction rolled back" };
         self.finish_task = Some(Task::spawn(ctx, async move { query.finish(commit).await }));
@@ -197,6 +267,7 @@ impl QueryTab {
     pub fn abandon_transaction(&mut self, ctx: &egui::Context) {
         if self.transaction_busy() { return; }
         let Some(query) = self.managed.clone() else { return };
+        self.stop_paging();
         self.transaction_error = None;
         self.finish_message = "Connection closed; the previous transaction outcome remains unknown";
         self.finish_task = Some(Task::spawn(ctx, async move { query.abandon().await; Ok(()) }));
@@ -227,29 +298,61 @@ impl QueryTab {
             return;
         }
         cx.session.log(sql.clone(), true);
+        self.stop_paging();
         self.running_sql = sql.clone();
         let timeout = cx.settings.query_timeout_secs;
-        if !self.auto_commit && query_transaction::supported(&cfg) {
+        let page_size = cx.settings.page_size.max(1);
+        let connection = if !self.auto_commit && query_transaction::supported(&cfg) {
             let query = self.managed.get_or_insert_with(|| ManagedQuery::new(cfg, schema)).clone();
             query.prepare_run();
-            self.task = Some(Task::spawn(cx.ctx, async move { query.execute(&sql, timeout).await }));
-            return;
+            PageConnection::Managed(query)
+        } else { PageConnection::Shared(cx.session.clone()) };
+        self.task = Some(Task::spawn(cx.ctx, async move { connection.run(&sql, timeout, page_size).await }));
+    }
+
+    fn stop_paging(&mut self) {
+        for result in &mut self.results {
+            result.cursor = None;
+            result.result.cursor = None;
+            result.result.cursor_owner = None;
+            result.page_task = None;
         }
-        self.task = Some(cx.session.spawn(cx.ctx, move |d| async move {
-            let mut d = d.lock().await;
-            if timeout > 0 {
-                match tokio::time::timeout(std::time::Duration::from_secs(timeout), d.execute(&sql)).await {
-                    Ok(r) => r,
-                    Err(_) => anyhow::bail!("Query timed out after {timeout} seconds"),
+    }
+
+    fn poll_pages(&mut self) {
+        for result in &mut self.results {
+            if let Some(page) = take(&mut result.page_task) {
+                match page {
+                    Ok(page) => {
+                        if page.columns != result.result.columns {
+                            result.page_error = Some("Result columns changed; run the query again".into());
+                            result.cursor = None;
+                            result.result.cursor = None;
+                            result.result.cursor_owner = None;
+                            continue;
+                        }
+                        result.result.cursor = page.cursor;
+                        if page.cursor.is_none() { result.cursor = None; result.result.cursor_owner = None; }
+                        result.result.elapsed_ms += page.elapsed_ms;
+                        result.result.rows.extend(page.rows.clone());
+                        result.rows.extend(page.rows);
+                        if let Some(&(column, ascending)) = result.sort.first() { grid::sort_rows(&mut result.rows, column, ascending); }
+                        grid::profile_all(&mut result.meta, &result.rows);
+                    }
+                    Err(error) => {
+                        result.page_error = Some(format!("{error:#}"));
+                        result.cursor = None;
+                        result.result.cursor = None;
+                        result.result.cursor_owner = None;
+                    }
                 }
-            } else {
-                d.execute(&sql).await
             }
-        }));
+        }
     }
 
     pub(super) fn poll(&mut self, cx: &mut TabCtx) {
         self.poll_transaction();
+        self.poll_pages();
         if let Some(r) = take(&mut self.ask_task) {
             self.ask_answer = Some(r.map_err(|e| format!("{e:#}")));
         }
@@ -263,12 +366,12 @@ impl QueryTab {
             self.runs.remove(0);
         }
         match r {
-            Ok(results) => {
+            Ok(mut results) => {
                 self.messages.clear();
                 let mut views = Vec::new();
-                for (i, res) in results.into_iter().enumerate() {
+                for (i, res) in std::mem::take(&mut results.results).into_iter().enumerate() {
                     if res.has_rows() {
-                        views.push(ResultView::new(res, dialect));
+                        views.push(ResultView::new(res, dialect, results.connection.clone(), results.page_size));
                     } else {
                         let what = match (res.affected, &res.message) {
                             (Some(n), _) => format!("{n} row{} affected", if n == 1 { "" } else { "s" }),
@@ -396,6 +499,9 @@ impl QueryTab {
         if ev.changed {
             self.dirty = true;
         }
+        if let Some(database) = ev.completion_database {
+            cx.actions.push(WsAction::LoadCompletionCatalog(database));
+        }
         if ev.run_current && context_ready && !self.transaction_busy() {
             cx.actions.push(WsAction::RunQuery { tab_id: self.id, sql: self.current_sql() });
         }
@@ -474,6 +580,10 @@ impl QueryTab {
     fn results_ui(&mut self, ui: &mut Ui, cx: &mut TabCtx) {
         let pal = p();
         let many = self.results.len() + usize::from(!self.messages.is_empty()) > 1;
+        if !many && self.results.len() == 1 && self.messages.is_empty() {
+            self.cell_ui(ui, cx, 0, false);
+            return;
+        }
         egui::ScrollArea::vertical().id_salt(("cells", self.id)).auto_shrink([false, false]).show(ui, |ui| {
             egui::Frame::new().show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -530,7 +640,13 @@ impl QueryTab {
                     }
                     let (cr, _) = ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
                     paint_icon(ui.painter(), cr, Icon::Check, pal.text_dim);
-                    ui.label(RichText::new(format!("{} ms · {} row{}", rv.result.elapsed_ms, rv.rows.len(), if rv.rows.len() == 1 { "" } else { "s" })).font(egui::FontId::monospace(12.0)).color(pal.text_dim));
+                    ui.label(RichText::new(format!("{} ms · {} row{}{}", rv.result.elapsed_ms, rv.rows.len(), if rv.rows.len() == 1 { "" } else { "s" }, if rv.cursor.is_some() { " loaded" } else { "" })).font(egui::FontId::monospace(12.0)).color(pal.text_dim));
+                    if rv.page_task.is_some() {
+                        ui.label(RichText::new("Loading more…").size(12.0).color(pal.text_dim));
+                    }
+                    if let Some(error) = &rv.page_error {
+                        ui.label(RichText::new("Loading stopped").size(12.0).color(pal.danger)).on_hover_text(error);
+                    }
                     let w = (ui.available_width() - 230.0).max(40.0);
                     ui.add_sized([w, 18.0], egui::Label::new(RichText::new(crate::db::sqlgen::ellipsize(&rv.result.sql.replace('\n', " "), 160)).font(egui::FontId::monospace(12.0)).color(pal.text_faint)).truncate());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -561,7 +677,7 @@ impl QueryTab {
             }
             let row_h = (cx.settings.grid_font_size * 1.85).round();
             let natural = row_h * (rv.rows.len() as f32 + 3.2) + 20.0;
-            let height = if many { natural.clamp(140.0, 380.0) } else { (ui.available_height() - 12.0).max(natural.min(380.0)).max(200.0) };
+            let height = if many { natural.clamp(140.0, 380.0) } else { ui.available_height().max(0.0) };
             match rv.view {
                 CellView::Chart => {
                     if let Some(spec) = rv.chart.clone() {
@@ -584,6 +700,15 @@ impl QueryTab {
                         let events = grid::show(ui, &src, &mut rv.grid, &opts);
                         for ev in events {
                             handle_grid_event(rv, ev, cx);
+                        }
+                        if rv.grid.near_end && rv.page_task.is_none() && rv.page_error.is_none() {
+                            if let Some(cursor) = &rv.cursor {
+                                let id = cursor.id;
+                                let connection = cursor.connection.clone();
+                                let page_size = rv.page_size;
+                                let timeout = cx.settings.query_timeout_secs;
+                                rv.page_task = Some(Task::spawn(cx.ctx, async move { connection.fetch(id, page_size, timeout).await }));
+                            }
                         }
                     });
                 }
