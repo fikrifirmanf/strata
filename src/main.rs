@@ -77,7 +77,8 @@ fn main() -> anyhow::Result<()> {
         // Content runs under the title bar; the traffic lights float over the rail.
         viewport = viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
     }
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
+    // wgpu, because the Embun glass on menus and popups renders with it (ui/glass.rs).
+    let options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Wgpu, ..Default::default() };
     eframe::run_native("Strata", options, Box::new(move |cc| Ok(Box::new(app::StrataApp::new(cc, store, launch, run_sql, new_window)))))
         .map_err(|e| anyhow::anyhow!("{e}"))
 }

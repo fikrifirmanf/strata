@@ -717,7 +717,8 @@ impl Default for Settings {
             column_profiles: true,
             check_updates: true,
             skipped_update: String::new(),
-            window_translucency: if cfg!(any(target_os = "macos", target_os = "windows")) { 0.35 } else { 0.0 },
+            // Opaque by default: surfaces are flat. Users can still let the desktop show through.
+            window_translucency: 0.0,
         }
     }
 }

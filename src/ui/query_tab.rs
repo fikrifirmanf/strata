@@ -421,19 +421,19 @@ impl QueryTab {
                     if run.on_hover_text("Run the statement under the caret, or the selection").clicked() {
                         cx.actions.push(WsAction::RunQuery { tab_id: self.id, sql: self.current_sql() });
                     }
-                    if ui.add_enabled_ui(ready, |ui| super::btn(ui, "Run all", super::BtnKind::Ghost)).inner.on_hover_text("Run every statement (⌘⇧↵)").clicked() {
+                    if ui.add_enabled_ui(ready, |ui| super::btn(ui, "Run all", super::BtnKind::Secondary)).inner.on_hover_text("Run every statement (⌘⇧↵)").clicked() {
                         cx.actions.push(WsAction::RunQuery { tab_id: self.id, sql: self.sql.clone() });
                     }
                 }
-                if !matches!(dialect, Dialect::Redis | Dialect::Mongo) && super::btn(ui, "Format", super::BtnKind::Ghost).on_hover_text("Format (⌘⇧F)").clicked() {
+                if !matches!(dialect, Dialect::Redis | Dialect::Mongo) && super::btn(ui, "Format", super::BtnKind::Secondary).on_hover_text("Format (⌘⇧F)").clicked() {
                     self.editor.format(&mut self.sql, cx.settings.uppercase_keywords, cx.settings.tab_width);
                     self.dirty = true;
                 }
-                if super::btn(ui, if self.saved_id.is_some() { "Saved" } else { "Save" }, super::BtnKind::Ghost).on_hover_text("Save to Queries (⌘S)").clicked() {
+                if super::btn(ui, if self.saved_id.is_some() { "Saved" } else { "Save" }, super::BtnKind::Secondary).on_hover_text("Save to Queries (⌘S)").clicked() {
                     cx.actions.push(WsAction::SaveQuery(self.id));
                 }
                 if let Some(prefix) = explain_prefix(dialect) {
-                    if super::btn(ui, "Explain", super::BtnKind::Ghost).on_hover_text("Show the query plan").clicked() {
+                    if super::btn(ui, "Explain", super::BtnKind::Secondary).on_hover_text("Show the query plan").clicked() {
                         let sql = format!("{prefix} {}", self.current_sql());
                         cx.actions.push(WsAction::RunQuery { tab_id: self.id, sql });
                     }
@@ -448,7 +448,7 @@ impl QueryTab {
                     if supported {
                         if !self.auto_commit {
                             let state = self.transaction_state();
-                            if ui.add_enabled_ui(self.has_pending_transaction() && !self.transaction_busy(), |ui| super::btn(ui, "Rollback", super::BtnKind::Ghost)).inner.clicked() {
+                            if ui.add_enabled_ui(self.has_pending_transaction() && !self.transaction_busy(), |ui| super::btn(ui, "Rollback", super::BtnKind::Secondary)).inner.clicked() {
                                 self.finish_transaction(cx.ctx, false);
                             }
                             if ui.add_enabled_ui(state == TransactionState::Active && !self.transaction_busy(), |ui| super::btn(ui, "Commit", super::BtnKind::Secondary)).inner.clicked() {
@@ -675,7 +675,7 @@ impl QueryTab {
             if rv.collapsed {
                 return;
             }
-            let row_h = (cx.settings.grid_font_size * 1.85).round();
+            let row_h = (cx.settings.grid_font_size + 9.5).round();
             let natural = row_h * (rv.rows.len() as f32 + 3.2) + 20.0;
             let height = if many { natural.clamp(140.0, 380.0) } else { ui.available_height().max(0.0) };
             match rv.view {
@@ -695,6 +695,8 @@ impl QueryTab {
                             null_text: &cx.settings.null_display,
                             font_size: cx.settings.grid_font_size,
                             row_height: None,
+                            show_row_numbers: cx.settings.show_row_numbers,
+                            alternating_rows: cx.settings.alternating_rows,
                         };
                         let src = ResultSource { meta: rv.meta.clone(), rows: &rv.rows, sort: &rv.sort };
                         let events = grid::show(ui, &src, &mut rv.grid, &opts);

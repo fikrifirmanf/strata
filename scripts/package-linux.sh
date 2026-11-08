@@ -9,7 +9,10 @@ stage="dist/${name}"
 rm -rf dist && mkdir -p "$stage"
 cp target/release/strata "$stage/strata"
 cp assets/icon/strata.png "$stage/strata.png"
-cp README.md LICENSE "$stage/"
+cp README.md LICENSE THIRD_PARTY_NOTICES.md "$stage/"
+mkdir -p "$stage/licenses"
+cp assets/fonts/OFL.txt "$stage/licenses/FONTS-OFL.txt"
+cp assets/db/README.md "$stage/licenses/DATABASE-LOGOS.md"
 cat > "$stage/strata.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application

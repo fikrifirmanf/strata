@@ -218,7 +218,7 @@ impl TableTab {
             linked: None,
             linked_task: None,
             quick_filter: String::new(),
-            density: 1,
+            density: 0,
         }
     }
 
@@ -512,6 +512,16 @@ impl TableTab {
         }
     }
 
+    /// Opens the inline cell editor for deterministic UI previews.
+    pub fn script_begin_edit(&mut self, row: usize, col: &str) {
+        let Some(c) = self.grid_meta.iter().position(|m| m.name == col) else { return };
+        if row >= self.data.rows.len() { return; }
+        let mut state = std::mem::take(&mut self.grid);
+        state.select_row(row);
+        state.begin_edit(&TableSource { tab: self }, row, c);
+        self.grid = state;
+    }
+
     /// Edits a cell by column name (used by the STRATA_SCRIPT development hook).
     pub fn script_edit(&mut self, row: usize, col: &str, value: &str) {
         if let Some(c) = self.grid_meta.iter().position(|m| m.name == col) {
@@ -695,7 +705,10 @@ impl TableTab {
                     ui.add(egui::Spinner::new().size(14.0).color(pal.text_dim));
                 }
                 if self.view == TableView::Data && self.obj.kind.has_rows() {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Reserve the whole action group so the wrapping toolbar cannot overlap the filter.
+                    let paging = self.req.offset > 0 || self.data.rows.len() >= self.req.limit;
+                    let tools_width = (if editable { 400.0 } else { 332.0 }) + if paging { 64.0 } else { 0.0 };
+                    ui.allocate_ui_with_layout(vec2(tools_width, 32.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         let mut d = self.density;
                         super::form::seg_well(ui, &mut d, &[(0, "Compact"), (1, "Cozy"), (2, "Roomy")], 0.0);
@@ -1155,7 +1168,9 @@ impl TableTab {
             editable,
             null_text: &cx.settings.null_display,
             font_size: cx.settings.grid_font_size,
-            row_height: Some([26.0, 32.0, 40.0][self.density.min(2) as usize]),
+            row_height: Some([22.0, 28.0, 36.0][self.density.min(2) as usize]),
+            show_row_numbers: cx.settings.show_row_numbers,
+            alternating_rows: cx.settings.alternating_rows,
         };
         let mut grid_state = std::mem::take(&mut self.grid);
         let src = TableSource { tab: self };
@@ -2055,6 +2070,7 @@ struct TableSource<'a> {
 }
 
 impl GridSource for TableSource<'_> {
+    fn row_number(&self, row: usize) -> usize { self.tab.req.offset + row + 1 }
     fn columns(&self) -> &[ColMeta] {
         &self.tab.grid_meta
     }
@@ -2095,6 +2111,16 @@ impl GridSource for TableSource<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tables_start_compact_and_row_numbers_follow_page_offset() {
+        let mut t = tab();
+        assert_eq!(t.density, 0);
+        assert_eq!(TableSource { tab: &t }.row_number(0), 1);
+        t.req.offset = 300;
+        assert_eq!(TableSource { tab: &t }.row_number(0), 301);
+        assert_eq!(TableSource { tab: &t }.row_number(9), 310);
+    }
 
     fn tab() -> TableTab {
         let mut t = TableTab::new(1, DbObject { parent: None, arguments: None, schema: "public".into(), name: "users".into(), kind: ObjectKind::Table }, TableView::Data, 300);

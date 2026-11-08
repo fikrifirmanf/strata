@@ -249,7 +249,7 @@ impl MetricsTab {
             }
             WidgetKind::Table => {
                 let gs = self.grids.entry(w.id).or_default();
-                let opts = grid::GridOptions { id: egui::Id::unique(("metric-grid", w.id)), editable: false, null_text: "NULL", font_size: cx.settings.grid_font_size - 0.5, row_height: None };
+                let opts = grid::GridOptions { id: egui::Id::unique(("metric-grid", w.id)), editable: false, null_text: "NULL", font_size: cx.settings.grid_font_size - 0.5, row_height: None, show_row_numbers: cx.settings.show_row_numbers, alternating_rows: cx.settings.alternating_rows };
                 let src = ResultSource { meta: grid::result_meta(r), rows: &r.rows, sort: &[] };
                 grid::show(ui, &src, gs, &opts);
             }

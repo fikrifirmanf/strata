@@ -7,6 +7,7 @@ pub mod diagram;
 pub mod dialogs;
 pub mod editor;
 pub mod geo;
+pub mod glass;
 pub mod grid;
 pub mod home;
 pub mod json_tree;
@@ -444,10 +445,10 @@ pub fn icon_button_colored(ui: &mut Ui, icon: Icon, tip: &str, tint: Option<Colo
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), tip));
     let hovered = resp.hovered();
     if active || hovered {
-        let fill = if active { mix(pal.surface_hover, pal.accent, 0.20) } else { pal.surface_hover };
-        ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+        let fill = if active { pal.control_on() } else { pal.control_hover() };
+        ui.painter().rect_filled(rect, CornerRadius::same(255), fill);
     }
-    let color = tint.unwrap_or(if active { pal.accent } else if hovered { pal.text } else { pal.text_dim });
+    let color = tint.unwrap_or(if active || hovered { pal.text } else { pal.text_dim });
     paint_icon(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), icon, color);
     let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip) };
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -459,19 +460,19 @@ pub fn primary_button(ui: &mut Ui, text: &str) -> Response {
         egui::Button::new(egui::RichText::new(text).color(pal.on_accent).strong())
             .fill(pal.accent)
             .stroke(Stroke::NONE)
-            .corner_radius(CornerRadius::same(6))
+            .corner_radius(CornerRadius::same(255))
             .min_size(vec2(0.0, 32.0)),
     )
 }
 
 pub fn danger_button(ui: &mut Ui, text: &str) -> Response {
     let pal = p();
-    ui.add(egui::Button::new(egui::RichText::new(text).color(Color32::WHITE).strong()).fill(pal.danger).stroke(Stroke::NONE).corner_radius(CornerRadius::same(10)).min_size(vec2(0.0, 32.0)))
+    ui.add(egui::Button::new(egui::RichText::new(text).color(Color32::WHITE).strong()).fill(pal.danger).stroke(Stroke::NONE).corner_radius(CornerRadius::same(255)).min_size(vec2(0.0, 32.0)))
 }
 
 pub fn secondary_button(ui: &mut Ui, text: &str) -> Response {
     let pal = p();
-    ui.add(egui::Button::new(egui::RichText::new(text).color(pal.text)).fill(Color32::TRANSPARENT).stroke(Stroke::new(1.0, pal.border)).corner_radius(CornerRadius::same(6)).min_size(vec2(0.0, 32.0)))
+    ui.add(egui::Button::new(egui::RichText::new(text).color(pal.text)).fill(pal.control()).stroke(Stroke::NONE).corner_radius(CornerRadius::same(255)).min_size(vec2(0.0, 32.0)))
 }
 
 pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
@@ -481,7 +482,7 @@ pub fn pill(ui: &mut Ui, text: &str, color: Color32) -> Response {
     let size = vec2(galley.size().x + 14.0, 18.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
     let bg = if pal.dark { color.gamma_multiply(0.18) } else { color.gamma_multiply(0.14) };
-    ui.painter().rect_filled(rect, CornerRadius::same(9), bg);
+    ui.painter().rect_filled(rect, CornerRadius::same(6), bg);
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
     resp
 }
@@ -588,10 +589,22 @@ pub fn line_edit(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
     egui::TextEdit::singleline(text).align(Align2::LEFT_CENTER)
 }
 
+/// Table menus keep hover backgrounds inset from the glass edge.
+pub(super) fn table_menu_frame(ui: &Ui) -> egui::Frame {
+    egui::Frame::menu(ui.style()).inner_margin(egui::Margin::same(12))
+}
+
+pub(super) fn table_menu_style(style: &mut egui::Style) {
+    egui::containers::menu::menu_style(style);
+    style.spacing.button_padding = vec2(12.0, 6.0);
+    style.spacing.item_spacing.y = 4.0;
+    style.visuals.widgets.hovered.corner_radius = CornerRadius::same(6);
+}
+
 pub fn card_frame() -> egui::Frame {
     let pal = p();
-    // Bento tile: surface 1 on the ground, hairline edge, 10 px corners.
-    egui::Frame::new().fill(pal.sidebar).stroke(Stroke::new(1.0, pal.glass_stroke)).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::same(16))
+    // Bento tile: a soft fill, 12 px corners, no edge and no shadow.
+    egui::Frame::new().fill(pal.control()).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::same(16))
 }
 
 pub fn empty_state(ui: &mut Ui, icon: Icon, title: &str, subtitle: &str) {
@@ -599,7 +612,7 @@ pub fn empty_state(ui: &mut Ui, icon: Icon, title: &str, subtitle: &str) {
     ui.vertical_centered(|ui| {
         ui.add_space((ui.available_height() * 0.28).max(20.0));
         let (r, _) = ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
-        ui.painter().rect_filled(r, CornerRadius::same(10), pal.surface);
+        ui.painter().rect_filled(r, CornerRadius::same(255), pal.control());
         paint_icon(ui.painter(), Rect::from_center_size(r.center(), vec2(26.0, 26.0)), icon, pal.text_faint);
         ui.add_space(10.0);
         ui.label(egui::RichText::new(title).size(15.0).strong());
@@ -612,14 +625,9 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T,
     form::seg_control(ui, value, options, 0.0)
 }
 
-/// Shared chrome surface. Solid fill keeps panels consistent over any desktop.
+/// Shared chrome surface: flat, solid, no edge. Regions meet at hairlines, not card borders.
 pub fn glass_frame() -> egui::Frame {
-    let pal = p();
-    egui::Frame::new()
-        .fill(pal.sidebar)
-        .stroke(Stroke::new(1.0, pal.glass_stroke))
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(12))
+    egui::Frame::new().fill(p().sidebar).inner_margin(egui::Margin::same(12))
 }
 
 /// Flat chrome for a docked panel: surface 1, no radius. The panel's own separator draws the edge.
@@ -647,10 +655,7 @@ pub fn env_chip(ui: &mut Ui, label: &str, color: Color32, strong: bool) -> Respo
     let size = vec2(galley.size().x + 26.0, 24.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let bg = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), if pal.dark { 36 } else { 30 });
-    ui.painter().rect_filled(rect, CornerRadius::same(255), bg);
-    if strong {
-        ui.painter().rect_stroke(rect, CornerRadius::same(255), Stroke::new(1.0, Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 110)), egui::StrokeKind::Inside);
-    }
+    ui.painter().rect_filled(rect, CornerRadius::same(6), bg);
     if strong {
         paint_icon(ui.painter(), Rect::from_center_size(pos2(rect.left() + 11.0, rect.center().y), vec2(11.0, 11.0)), Icon::Lock, text_color);
     } else {
@@ -744,13 +749,15 @@ impl Toasts {
                 let r = egui::Frame::new()
                     .fill(pal.sheet())
                     .stroke(Stroke::new(1.0, pal.glass_stroke))
-                    .corner_radius(CornerRadius::same(10))
-                    .shadow(egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(90) })
+                    .corner_radius(CornerRadius::same(12))
+                    .shadow(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(if pal.dark { 110 } else { 36 }) })
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            let (r, _) = ui.allocate_exact_size(vec2(4.0, 18.0), Sense::hover());
-                            ui.painter().rect_filled(r, CornerRadius::same(2), color);
+                            let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                            ui.painter().circle_filled(r.center(), 9.0, color.gamma_multiply(0.22));
+                            let icon = match t.kind { ToastKind::Success => Icon::Check, ToastKind::Error => Icon::Close, ToastKind::Info => Icon::Sparkle };
+                            paint_icon(ui.painter(), Rect::from_center_size(r.center(), vec2(11.0, 11.0)), icon, color);
                             ui.add(egui::Label::new(egui::RichText::new(&t.text).size(12.5)).wrap());
                         });
                     })
@@ -873,7 +880,8 @@ pub enum BtnKind {
     Ghost,
 }
 
-/// The one button: 32 px tall, 12 px sides, 6 px corners, Medium 13. The hover fill eases in.
+/// The one button: a 32 px pill, 12 px sides, Medium 13. Primary is solid ochre; secondary a soft
+/// grey fill that brightens on hover; ghost has no fill until hovered.
 pub fn btn(ui: &mut Ui, text: &str, kind: BtnKind) -> Response {
     btn_sized(ui, text, kind, 32.0)
 }
@@ -893,17 +901,14 @@ pub fn btn_icon(ui: &mut Ui, icon: Icon, text: &str, shortcut: &str, kind: BtnKi
     let (rect, resp) = ui.allocate_exact_size(vec2(12.0 + 16.0 + 8.0 + g.size().x + kw + 12.0, 32.0), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
     let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() && enabled, motion::FAST as f32);
-    let r = CornerRadius::same(6);
+    let r = CornerRadius::same(255);
     let fade = if enabled { 1.0 } else { 0.45 };
     let mut color = fg;
     match kind {
         BtnKind::Primary => { ui.painter().rect_filled(rect, r, mix(pal.accent, Color32::WHITE, 0.08 * t).gamma_multiply(fade)); }
-        BtnKind::Secondary => {
-            if t > 0.0 { ui.painter().rect_filled(rect, r, pal.surface_hover.gamma_multiply(t)); }
-            ui.painter().rect_stroke(rect, r, Stroke::new(1.0, line2()), egui::StrokeKind::Inside);
-        }
+        BtnKind::Secondary => { ui.painter().rect_filled(rect, r, pal.control().lerp_to_gamma(pal.control_hover(), t)); }
         BtnKind::Ghost => {
-            if t > 0.0 { ui.painter().rect_filled(rect, r, pal.surface_hover.gamma_multiply(t)); }
+            if t > 0.0 { ui.painter().rect_filled(rect, r, pal.control().gamma_multiply(t)); }
             color = mix(pal.text_dim, pal.text, t);
         }
     }
@@ -930,18 +935,15 @@ pub fn btn_sized(ui: &mut Ui, text: &str, kind: BtnKind, h: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(g.size().x + 24.0, h), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
     let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() && enabled, motion::FAST as f32);
-    let r = CornerRadius::same(6);
+    let r = CornerRadius::same(255);
     let painter = ui.painter();
     let fade = if enabled { 1.0 } else { 0.45 };
     let mut text_color = fg;
     match kind {
         BtnKind::Primary => { painter.rect_filled(rect, r, mix(pal.accent, Color32::WHITE, 0.08 * t).gamma_multiply(fade)); }
-        BtnKind::Secondary => {
-            if t > 0.0 { painter.rect_filled(rect, r, pal.surface_hover.gamma_multiply(t)); }
-            painter.rect_stroke(rect, r, Stroke::new(1.0, line2()), egui::StrokeKind::Inside);
-        }
+        BtnKind::Secondary => { painter.rect_filled(rect, r, pal.control().lerp_to_gamma(pal.control_hover(), t)); }
         BtnKind::Ghost => {
-            if t > 0.0 { painter.rect_filled(rect, r, pal.surface_hover.gamma_multiply(t)); }
+            if t > 0.0 { painter.rect_filled(rect, r, pal.control().gamma_multiply(t)); }
             text_color = mix(pal.text_dim, pal.text, t);
         }
     }
@@ -949,13 +951,14 @@ pub fn btn_sized(ui: &mut Ui, text: &str, kind: BtnKind, h: f32) -> Response {
     if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
 }
 
-/// 32 px square icon button: text2, s3 plate on hover.
+/// 32 px round icon button on a soft fill, brighter on hover, brightest when on.
 pub fn tool_button(ui: &mut Ui, icon: Icon, tip: &str, active: bool) -> Response {
     let pal = p();
     let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip));
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, active, tip));
     let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() || active, motion::FAST as f32);
-    if t > 0.0 { ui.painter().rect_filled(rect, CornerRadius::same(6), pal.surface_hover.gamma_multiply(t)); }
+    let fill = if active { pal.control_on() } else { pal.control().lerp_to_gamma(pal.control_hover(), t) };
+    ui.painter().rect_filled(rect, CornerRadius::same(255), fill);
     paint_icon(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), icon, mix(pal.text_dim, pal.text, t));
     resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }

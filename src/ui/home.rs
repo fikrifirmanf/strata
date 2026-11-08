@@ -50,6 +50,8 @@ pub struct ConnEditor {
 #[derive(Default)]
 pub struct Home {
     search: String,
+    connection_search: String,
+    page: usize,
     group: Option<Option<Uuid>>,
     env: Option<Tag>,
     /// The launchpad row that is unfolded to show its details.
@@ -107,23 +109,13 @@ impl Home {
                         return;
                     }
                     ui.add_space(32.0);
-                    let q = self.search.to_lowercase();
-                    let looks_like_url = q.contains("://");
-                    let mut visible: Vec<&ConnectionConfig> = conns
-                        .connections
-                        .iter()
-                        .filter(|c| self.group.map(|g| c.group == g).unwrap_or(true))
-                        .filter(|c| self.env.map(|e| c.tag == e).unwrap_or(true))
-                        .filter(|c| looks_like_url || q.is_empty() || c.display_name().to_lowercase().contains(&q) || c.host.to_lowercase().contains(&q) || c.database.to_lowercase().contains(&q) || c.driver.label().to_lowercase().contains(&q))
-                        .collect();
-                    visible.sort_by(|a, b| b.last_used.cmp(&a.last_used).then_with(|| a.display_name().to_lowercase().cmp(&b.display_name().to_lowercase())));
                     if narrow {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             self.filters_ui(ui, conns, false, &mut actions);
                         });
                         ui.add_space(16.0);
-                        self.table(ui, &visible, conns, open, true, &mut actions);
+                        self.connection_list(ui, conns, open, true, &mut actions);
                     } else {
                         ui.horizontal_top(|ui| {
                             ui.vertical(|ui| {
@@ -132,7 +124,7 @@ impl Home {
                                 self.filters_ui(ui, conns, true, &mut actions);
                             });
                             ui.add_space(32.0);
-                            ui.vertical(|ui| self.table(ui, &visible, conns, open, false, &mut actions));
+                            ui.vertical(|ui| self.connection_list(ui, conns, open, false, &mut actions));
                         });
                     }
                     ui.add_space(64.0);
@@ -276,8 +268,10 @@ impl Home {
         let focus_id = egui::Id::unique("home-omni");
         let focused = ui.ctx().memory(|m| m.has_focus(focus_id));
         let ft = ui.ctx().animate_bool_with_time(focus_id.with("ring"), focused, super::motion::FAST as f32);
-        ui.painter().rect_filled(rect, egui::CornerRadius::same(6), pal.sidebar);
-        ui.painter().rect_stroke(rect, egui::CornerRadius::same(6), Stroke::new(1.0 + 0.5 * ft, line2().lerp_to_gamma(pal.grid_selection_border, ft)), egui::StrokeKind::Inside);
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(255), pal.control());
+        if ft > 0.0 {
+            ui.painter().rect_stroke(rect, egui::CornerRadius::same(255), Stroke::new(1.0, pal.text_dim.gamma_multiply(ft)), egui::StrokeKind::Inside);
+        }
         paint_icon(ui.painter(), egui::Rect::from_center_size(egui::pos2(rect.left() + 20.0, rect.center().y), vec2(16.0, 16.0)), Icon::Search, pal.text_faint);
         // Detected engine label slides open beside the Connect button.
         let dt = ui.ctx().animate_bool_with_time(focus_id.with("detect"), detected.is_some(), super::motion::SETTLE as f32);
@@ -304,6 +298,9 @@ impl Home {
                 .frame(egui::Frame::NONE)
                 .desired_width(edit_rect.width()),
         );
+        if resp.changed() {
+            self.page = 0;
+        }
         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             connect = true;
         }
@@ -348,8 +345,8 @@ impl Home {
             let w = if column { ui.available_width() } else { g.size().x + ng.size().x + dot_w + 24.0 };
             let (r, resp) = ui.allocate_exact_size(vec2(w, 32.0), egui::Sense::click());
             let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), super::motion::FAST as f32);
-            let fill = if selected { pal.surface_hover } else { pal.surface.gamma_multiply(t) };
-            ui.painter().rect_filled(r, egui::CornerRadius::same(6), fill);
+            let fill = if selected { pal.control_on() } else { pal.control().gamma_multiply(t) };
+            ui.painter().rect_filled(r, egui::CornerRadius::same(8), fill);
             let mut x = r.left() + 8.0;
             if let Some(c) = dot {
                 ui.painter().circle_filled(egui::pos2(x + 4.0, r.center().y), 4.0, c);
@@ -363,6 +360,7 @@ impl Home {
             resp.on_hover_cursor(egui::CursorIcon::PointingHand)
         };
         if row(ui, self.env.is_none() && self.group.is_none(), "All", None, conns.connections.len()).clicked() {
+            self.page = 0;
             self.env = None;
             self.group = None;
         }
@@ -371,6 +369,7 @@ impl Home {
             let label = t.label();
             let label = format!("{}{}", label[..1].to_uppercase(), &label[1..]);
             if row(ui, self.env == Some(t), &label, Some(env_color(t)), n).clicked() {
+                self.page = 0;
                 self.env = if self.env == Some(t) { None } else { Some(t) };
                 self.group = None;
             }
@@ -382,6 +381,7 @@ impl Home {
             let n = conns.connections.iter().filter(|c| c.group == Some(g.id)).count();
             let r = row(ui, self.group == Some(Some(g.id)), &g.name, Some(crate::theme::rgb(g.color)), n);
             if r.clicked() {
+                self.page = 0;
                 self.group = if self.group == Some(Some(g.id)) { None } else { Some(Some(g.id)) };
                 self.env = None;
             }
@@ -430,6 +430,48 @@ impl Home {
         });
     }
 
+    /// Search and paginate saved connections after applying the environment/group filters.
+    fn connection_list(&mut self, ui: &mut egui::Ui, conns: &ConnectionFile, open: &[Uuid], narrow: bool, actions: &mut Vec<HomeAction>) {
+        ui.label(RichText::new("Saved connections").font(semibold(14.0)).color(p().text));
+        ui.add_space(8.0);
+        if super::form::search_field(ui, &mut self.connection_search,
+            "Search name, host, database or engine", egui::Id::unique("home-connection-search"), ui.available_width()).changed() {
+            self.page = 0;
+        }
+        ui.add_space(12.0);
+        let queries = [self.search.trim().to_lowercase(), self.connection_search.trim().to_lowercase()];
+        let mut visible: Vec<&ConnectionConfig> = conns.connections.iter()
+            .filter(|c| self.group.map(|g| c.group == g).unwrap_or(true))
+            .filter(|c| self.env.map(|e| c.tag == e).unwrap_or(true))
+            .filter(|c| queries.iter().all(|q| q.is_empty() || q.contains("://")
+                || c.display_name().to_lowercase().contains(q)
+                || c.host.to_lowercase().contains(q)
+                || c.database.to_lowercase().contains(q)
+                || c.driver.label().to_lowercase().contains(q)))
+            .collect();
+        visible.sort_by(|a, b| b.last_used.cmp(&a.last_used).then_with(|| a.display_name().to_lowercase().cmp(&b.display_name().to_lowercase())));
+        let pages = visible.len().div_ceil(10).max(1);
+        self.page = self.page.min(pages - 1);
+        let start = self.page * 10;
+        let end = (start + 10).min(visible.len());
+        self.table(ui, &visible[start..end], conns, open, narrow, actions);
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let first = if visible.is_empty() { 0 } else { start + 1 };
+            ui.label(dim(format!("{first}–{end} of {}", visible.len())));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(self.page + 1 < pages, egui::Button::new("Next")).clicked() {
+                    self.page += 1;
+                }
+                ui.label(dim(format!("Page {} of {pages}", self.page + 1)));
+                if ui.add_enabled(self.page > 0, egui::Button::new("Previous")).clicked() {
+                    self.page -= 1;
+                }
+            });
+        });
+    }
+
     /// Swiss table: brand tile, name, address, environment, last used. A row unfolds to its details.
     fn table(&mut self, ui: &mut egui::Ui, items: &[&ConnectionConfig], conns: &ConnectionFile, open: &[Uuid], narrow: bool, actions: &mut Vec<HomeAction>) {
         let pal = p();
@@ -445,13 +487,13 @@ impl Home {
         let x_addr = x_name + name_w + 12.0;
         let x_env = x_addr + addr_w + 12.0;
         let x_used = x_env + 112.0 + 12.0;
-        let frame = egui::Frame::new().stroke(Stroke::new(1.0, line2())).corner_radius(egui::CornerRadius::same(6));
+        // Flat list on the canvas: hairlines between rows, a rounded soft fill under the pointer.
+        let frame = egui::Frame::new();
         frame.show(ui, |ui| {
             ui.set_width(full);
             ui.spacing_mut().item_spacing.y = 0.0;
             if !narrow {
                 let (hr, _) = ui.allocate_exact_size(vec2(full, 32.0), egui::Sense::hover());
-                ui.painter().rect_filled(hr, egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, pal.sidebar);
                 for (x, t) in [(x_name, "Name"), (x_addr, "Address"), (x_env, "Environment"), (x_used, "Last used")] {
                     ui.painter().text(egui::pos2(hr.left() + x, hr.center().y), egui::Align2::LEFT_CENTER, t, egui::FontId::proportional(12.0), pal.text_faint);
                 }
@@ -462,7 +504,6 @@ impl Home {
                 ui.painter().text(egui::pos2(r.left() + 12.0, r.center().y), egui::Align2::LEFT_CENTER, "No connections match. Try another name, host or environment.", egui::FontId::proportional(13.0), pal.text_dim);
                 return;
             }
-            let last = items.len() - 1;
             for (i, c) in items.iter().enumerate() {
                 let expanded = self.open_row == Some(c.id);
                 let (rect, resp) = ui.allocate_exact_size(vec2(full, 52.0), egui::Sense::click());
@@ -472,10 +513,8 @@ impl Home {
                 }
                 let t = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), super::motion::FAST as f32);
                 let et = ui.ctx().animate_bool_with_time(resp.id.with("open"), expanded, super::motion::SETTLE as f32);
-                let round_bottom = i == last && et == 0.0;
-                let round_top = narrow && i == 0;
-                let radius = egui::CornerRadius { nw: if round_top { 6 } else { 0 }, ne: if round_top { 6 } else { 0 }, sw: if round_bottom { 6 } else { 0 }, se: if round_bottom { 6 } else { 0 } };
-                let fill = pal.sidebar.gamma_multiply(t).lerp_to_gamma(pal.surface, et);
+                let radius = egui::CornerRadius::same(10);
+                let fill = pal.control().gamma_multiply(t).lerp_to_gamma(pal.control_hover(), et);
                 if t > 0.0 || et > 0.0 {
                     painter.rect_filled(rect.shrink2(vec2(0.5, 0.0)), radius, fill);
                 }
@@ -506,8 +545,8 @@ impl Home {
                 let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                 resp.context_menu(|ui| self.row_menu(ui, c, conns, actions));
                 let body = super::motion::unfold(ui, egui::Id::unique(("conn-detail", c.id)), expanded, |ui| {
-                    egui::Frame::new().fill(pal.surface).inner_margin(egui::Margin { left: if narrow { 12 } else { 56 }, right: 12, top: 4, bottom: 12 })
-                        .corner_radius(egui::CornerRadius { nw: 0, ne: 0, sw: if i == last { 6 } else { 0 }, se: if i == last { 6 } else { 0 } })
+                    egui::Frame::new().fill(pal.control()).inner_margin(egui::Margin { left: if narrow { 12 } else { 56 }, right: 12, top: 4, bottom: 12 })
+                        .corner_radius(egui::CornerRadius::same(10))
                         .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal_wrapped(|ui| {
@@ -1052,5 +1091,108 @@ pub fn paint_logo(painter: &egui::Painter, r: egui::Rect) {
     for (x, y, w, color) in rows {
         let rect = egui::Rect::from_min_size(origin + egui::vec2(x * u, y * u), egui::vec2(w * u, 72.0 * u));
         painter.rect_filled(rect, 18.0 * u, color);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> ConnectionFile {
+        ConnectionFile {
+            connections: (0..23).map(|i| {
+                let mut c = ConnectionConfig::new(DriverKind::Postgres);
+                c.name = format!("Database {i:02}");
+                c.host = format!("host-{i:02}.test");
+                c.database = format!("catalog_{i:02}");
+                c.tag = if i < 12 { Tag::Staging } else { Tag::Production };
+                c
+            }).collect(),
+            groups: Vec::new(),
+        }
+    }
+
+    fn render(ctx: &egui::Context, home: &mut Home, conns: &ConnectionFile, events: Vec<egui::Event>) -> Vec<(String, egui::Rect)> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1200.0, 1600.0))),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            let mut actions = Vec::new();
+            home.filters_ui(ui, conns, true, &mut actions);
+            home.connection_list(ui, conns, &[], false, &mut actions);
+        });
+        out.textures_delta.clear();
+        fn collect(shape: &egui::Shape, texts: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(t) => texts.push((t.galley.text().to_owned(), egui::Rect::from_min_size(t.pos, t.galley.size()))),
+                egui::Shape::Vec(shapes) => for s in shapes { collect(s, texts); },
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for s in out.shapes { collect(&s.shape, &mut texts); }
+        texts
+    }
+
+    fn click(ctx: &egui::Context, home: &mut Home, conns: &ConnectionFile, label: &str) -> Vec<(String, egui::Rect)> {
+        let texts = render(ctx, home, conns, Vec::new());
+        let pos = texts.iter().find(|(s, _)| s == label).unwrap().1.center();
+        render(ctx, home, conns, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+            pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE,
+        }]);
+        render(ctx, home, conns, vec![egui::Event::PointerButton {
+            pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE,
+        }]);
+        render(ctx, home, conns, Vec::new())
+    }
+
+    fn names(texts: &[(String, egui::Rect)]) -> Vec<String> {
+        texts.iter().filter(|(s, _)| s.starts_with("Database ")).map(|(s, _)| s.clone()).collect()
+    }
+
+    #[test]
+    fn saved_connections_page_through_ten_rows_and_clamp_after_removal() {
+        let ctx = egui::Context::default();
+        let mut home = Home::default();
+        let mut conns = fixture();
+        let first = render(&ctx, &mut home, &conns, Vec::new());
+        assert_eq!(names(&first), (0..10).map(|i| format!("Database {i:02}")).collect::<Vec<_>>());
+        let second = click(&ctx, &mut home, &conns, "Next");
+        assert_eq!(names(&second), (10..20).map(|i| format!("Database {i:02}")).collect::<Vec<_>>());
+        let third = click(&ctx, &mut home, &conns, "Next");
+        assert_eq!(names(&third), vec!["Database 20", "Database 21", "Database 22"]);
+        let back = click(&ctx, &mut home, &conns, "Previous");
+        assert_eq!(names(&back).len(), 10);
+        assert_eq!(home.page, 1);
+        conns.connections.truncate(2);
+        assert_eq!(names(&render(&ctx, &mut home, &conns, Vec::new())), vec!["Database 00", "Database 01"]);
+        assert_eq!(home.page, 0);
+    }
+
+    #[test]
+    fn searching_and_environment_filters_reset_to_first_page() {
+        let ctx = egui::Context::default();
+        let mut home = Home::default();
+        let conns = fixture();
+        render(&ctx, &mut home, &conns, Vec::new());
+        click(&ctx, &mut home, &conns, "Next");
+        ctx.memory_mut(|m| m.request_focus(egui::Id::unique("home-connection-search")));
+        let result = render(&ctx, &mut home, &conns, vec![egui::Event::Text("host-22".into())]);
+        assert_eq!(names(&result), vec!["Database 22"]);
+        assert_eq!(home.page, 0);
+        home.connection_search.clear();
+        click(&ctx, &mut home, &conns, "Next");
+        let staging = click(&ctx, &mut home, &conns, "Staging");
+        assert_eq!(home.page, 0);
+        assert_eq!(names(&staging), (0..10).map(|i| format!("Database {i:02}")).collect::<Vec<_>>());
+        let last = click(&ctx, &mut home, &conns, "Next");
+        assert_eq!(names(&last), vec!["Database 10", "Database 11"]);
+        home.connection_search = "missing".into();
+        let empty = render(&ctx, &mut home, &conns, Vec::new());
+        assert_eq!(names(&empty), Vec::<String>::new());
+        assert_eq!(home.page, 0);
+        assert!(empty.iter().any(|(s, _)| s == "0–0 of 0"));
     }
 }

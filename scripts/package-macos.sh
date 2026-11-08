@@ -13,6 +13,10 @@ ln -s /Applications "$stage/Applications"
 lipo -create -output "$app/Contents/MacOS/strata" \
   target/aarch64-apple-darwin/release/strata target/x86_64-apple-darwin/release/strata
 cp assets/icon/strata.icns "$app/Contents/Resources/strata.icns"
+mkdir -p "$app/Contents/Resources/licenses"
+cp LICENSE THIRD_PARTY_NOTICES.md "$app/Contents/Resources/"
+cp assets/fonts/OFL.txt "$app/Contents/Resources/licenses/FONTS-OFL.txt"
+cp assets/db/README.md "$app/Contents/Resources/licenses/DATABASE-LOGOS.md"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

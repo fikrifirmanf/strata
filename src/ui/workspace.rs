@@ -1078,7 +1078,6 @@ impl Workspace {
         }
         let mut actions: Vec<WsAction> = Vec::new();
 
-        self.env_ribbon(&ctx);
         if !cfg!(target_os = "macos") { self.menu_bar_ui(ui, sh, &mut actions); }
         self.header_ui(ui, sh, &mut actions);
 
@@ -1199,8 +1198,8 @@ impl Workspace {
 
     /// Replays one STRATA_SCRIPT step every ~0.7 s once the connection is idle. Steps:
     /// `open:TABLE`, `view:data|structure|relations|profile`, `select:ROW`, `inspect`, `edit:ROW:COL:VALUE`,
-    /// `delete:ROW`, `insert`, `review`, `graph`, `er`, `node:TABLE`, `query:SQL`, `assistant`, `console`,
-    /// `connection` (edit form), `settings`, `board` (first metrics board), `schemas` (schema menu), `connmenu` (connection menu).
+    /// `celledit:ROW:COL`, `delete:ROW`, `insert`, `review`, `graph`, `er`, `node:TABLE`, `query:SQL`, `assistant`, `console`,
+    /// `connection` (edit form), `settings`, `board` (first metrics board), `schemas` (schema menu), `connmenu` (connection menu), `cellmenu` (grid cell menu), `tablemenu` (sidebar table menu), `search` (Open anything).
     fn script_step(&mut self, ctx: &egui::Context, sh: &mut Shared, actions: &mut Vec<WsAction>) {
         if self.script.is_empty() {
             return;
@@ -1229,6 +1228,8 @@ impl Workspace {
             }
             "graph" => actions.push(WsAction::OpenDiagram),
             "query" => actions.push(WsAction::OpenQuery { sql: arg.replace("|", ";\n"), title: None, run: true }),
+            "tablemenu" => { ctx.data_mut(|d| d.insert_temp(egui::Id::unique("script-open-tablemenu"), true)); }
+            "search" => self.modal = Some(Modal::open_anything()),
             "inspect" => self.right = RightPanel::RowDetail,
             "assistant" => self.right = RightPanel::Assistant,
             "console" => self.console = !self.console,
@@ -1236,6 +1237,7 @@ impl Workspace {
             "settings" => *sh.open_settings = true,
             "schemas" => { ctx.data_mut(|d| d.insert_temp(egui::Id::unique("script-open-schemas"), true)); }
             "connmenu" => { ctx.data_mut(|d| d.insert_temp(egui::Id::unique("script-open-connmenu"), true)); }
+            "cellmenu" => { ctx.data_mut(|d| d.insert_temp(egui::Id::unique("script-open-cellmenu"), true)); }
             "board" => actions.push(WsAction::OpenMetrics(sh.boards.iter().find(|b| b.connection == self.cfg.id).or(sh.boards.first()).map(|b| b.id))),
             "review" => {
                 if let Some(t) = self.tabs.get(self.active) {
@@ -1265,6 +1267,7 @@ impl Workspace {
                         }
                     }
                     "select" => t.grid.select_row(row),
+                    "celledit" => t.script_begin_edit(row, parts.next().unwrap_or("")),
                     "delete" => {
                         t.grid.select_row(row);
                         t.delete_selected();
@@ -1281,15 +1284,6 @@ impl Workspace {
     }
 
     /// A hairline in the environment color along the window's top edge.
-    fn env_ribbon(&self, ctx: &egui::Context) {
-        if self.cfg.tag == Tag::None {
-            return;
-        }
-        let r = ctx.content_rect();
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("env-ribbon")));
-        painter.rect_filled(egui::Rect::from_min_size(r.min, vec2(r.width(), 3.0)), egui::CornerRadius::ZERO, crate::theme::rgb(self.cfg.tag.color()));
-    }
-
     fn menu_bar_ui(&mut self, ui: &mut egui::Ui, sh: &mut Shared, actions: &mut Vec<WsAction>) {
         egui::Panel::top(egui::Id::unique(("workspace-menubar", self.cfg.id)))
             .exact_size(32.0).show_separator_line(false)
@@ -1380,9 +1374,9 @@ impl Workspace {
                         // The jump field takes the middle, up to 520 px, centred in what is left.
                         let avail = ui.available_width();
                         if avail > 140.0 {
-                            let (mid, _) = ui.allocate_exact_size(vec2(avail, 32.0), egui::Sense::hover());
-                            let w = (avail - 24.0).min(520.0);
-                            let rect = egui::Rect::from_center_size(mid.center(), vec2(w, 32.0));
+                            let (mid, _) = ui.allocate_exact_size(vec2(avail, 30.0), egui::Sense::hover());
+                            let w = (avail - 24.0).min(420.0);
+                            let rect = egui::Rect::from_center_size(mid.center(), vec2(w, 30.0));
                             self.jump_ui(ui, rect);
                         }
                     });
@@ -1390,39 +1384,22 @@ impl Workspace {
             });
     }
 
-    /// A breadcrumb button: 32 px, 8 px sides, s3 plate on hover.
+    /// A breadcrumb button: a 30 px soft pill, 8 px sides, brighter on hover.
     fn crumb(ui: &mut egui::Ui, width: f32, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
-        let (r, resp) = ui.allocate_exact_size(vec2(width, 32.0), egui::Sense::click());
+        let (r, resp) = ui.allocate_exact_size(vec2(width + 4.0, 30.0), egui::Sense::click());
         let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), super::motion::FAST as f32);
-        if t > 0.0 {
-            ui.painter().rect_filled(r, egui::CornerRadius::same(6), p().surface_hover.gamma_multiply(t));
-        }
+        let pal = p();
+        ui.painter().rect_filled(r, egui::CornerRadius::same(255), pal.control().lerp_to_gamma(pal.control_hover(), t));
+        let r = r.shrink2(vec2(2.0, 0.0));
         paint(ui.painter(), r);
         resp.on_hover_cursor(egui::CursorIcon::PointingHand)
     }
 
     fn location_ui(&mut self, ui: &mut egui::Ui, sh: &mut Shared, actions: &mut Vec<WsAction>) {
         let pal = p();
-        // Connection crumb: brand tile, name, environment tag. Opens the connection menu.
-        let name = self.cfg.display_name();
-        let name_w = ui.painter().layout_no_wrap(name.clone(), medium(13.0), pal.text).size().x.min(220.0);
-        let tag = (self.cfg.tag != Tag::None).then(|| self.cfg.tag);
-        let tag_w = tag.map(|t| ui.painter().layout_no_wrap(t.label().to_string(), medium(12.0), pal.text).size().x + 24.0).unwrap_or(0.0);
-        let width = 8.0 + 24.0 + 8.0 + name_w + if tag.is_some() { 8.0 + tag_w } else { 0.0 } + 8.0;
-        let driver = self.cfg.driver;
-        let conn = Self::crumb(ui, width, |painter, r| {
-            let tile = egui::Rect::from_min_size(egui::pos2(r.left() + 8.0, r.center().y - 12.0), vec2(24.0, 24.0));
-            paint_driver_badge(painter, tile, driver);
-            let text = super::home::ellipsize_to(painter, &name, medium(13.0), 220.0);
-            painter.text(egui::pos2(tile.right() + 8.0, r.center().y), egui::Align2::LEFT_CENTER, text, medium(13.0), pal.text);
-            if let Some(t) = tag {
-                let c = env_color(t);
-                let pill = egui::Rect::from_min_size(egui::pos2(tile.right() + 8.0 + name_w + 8.0, r.center().y - 10.0), vec2(tag_w, 20.0));
-                painter.rect_filled(pill, egui::CornerRadius::same(4), pal.surface_hover);
-                painter.circle_filled(egui::pos2(pill.left() + 9.0, pill.center().y), 3.0, c);
-                painter.text(egui::pos2(pill.left() + 18.0, pill.center().y), egui::Align2::LEFT_CENTER, t.label(), medium(12.0), c);
-            }
-        });
+        // The environment bar: the connection summary in a pill filled with the environment
+        // colour, so production never looks like local. Opens the connection menu.
+        let conn = self.env_bar(ui);
         let conn = conn.on_hover_text(format!("{}\n{}", self.cfg.display_name(), self.cfg.subtitle()));
         if ui.ctx().data_mut(|d| d.remove_temp::<bool>(egui::Id::unique("script-open-connmenu"))).is_some() {
             egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&conn));
@@ -1513,12 +1490,41 @@ impl Workspace {
         }
     }
 
+    /// "STAGING | PostgreSQL 16.4 : Orders API" on the environment colour, or on a soft grey pill
+    /// when the connection has no environment tag.
+    fn env_bar(&self, ui: &mut egui::Ui) -> egui::Response {
+        let pal = p();
+        let tag = self.cfg.tag;
+        let tagged = tag != Tag::None;
+        let ink = if tagged { Color32::from_rgb(26, 18, 6) } else { pal.text };
+        let soft = ink.gamma_multiply(0.55);
+        let font = mono_medium(12.0);
+        let version = self.session.as_ref().and_then(|s| s.server_version.as_deref()).map(|v| short_version(self.cfg.driver.label(), v)).unwrap_or_else(|| self.cfg.driver.label().to_string());
+        let mut job = egui::text::LayoutJob::default();
+        let mut push = |text: &str, color: Color32| job.append(text, 0.0, egui::TextFormat::simple(font.clone(), color));
+        if tagged {
+            push(&tag.label().to_uppercase(), ink);
+            push("  |  ", soft);
+        }
+        push(&version, ink);
+        push("  :  ", soft);
+        push(&self.cfg.display_name(), ink);
+        job.wrap = egui::text::TextWrapping { max_width: 420.0, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+        let galley = ui.painter().layout_job(job);
+        let (r, resp) = ui.allocate_exact_size(vec2(galley.size().x + 28.0, 30.0), egui::Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} connection {}", tag.label(), self.cfg.display_name())));
+        let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), super::motion::FAST as f32);
+        let fill = if tagged { mix(crate::theme::rgb(tag.color()), Color32::WHITE, 0.10 * t) } else { pal.control().lerp_to_gamma(pal.control_hover(), t) };
+        ui.painter().rect_filled(r, egui::CornerRadius::same(255), fill);
+        ui.painter().galley(egui::pos2(r.left() + 14.0, r.center().y - galley.size().y / 2.0), galley, ink);
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    }
+
     fn jump_ui(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         let pal = p();
         let response = ui.interact(rect, egui::Id::unique(("jump", self.cfg.id)), egui::Sense::click());
         let t = ui.ctx().animate_bool_with_time(response.id, response.hovered(), super::motion::FAST as f32);
-        ui.painter().rect_filled(rect, egui::CornerRadius::same(6), pal.window);
-        ui.painter().rect_stroke(rect, egui::CornerRadius::same(6), egui::Stroke::new(1.0, line().lerp_to_gamma(line2(), t)), egui::StrokeKind::Inside);
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(255), pal.control().lerp_to_gamma(pal.control_hover(), t));
         paint_icon(ui.painter(), egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), vec2(16.0, 16.0)), Icon::Search, pal.text_faint);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Jump to anything"));
         let shortcut = if cfg!(target_os = "macos") { "⌘P" } else { "Ctrl+P" };
@@ -1573,15 +1579,16 @@ impl Workspace {
             }
         });
         let (dot, text) = match self.status {
-            ConnState::Connected => (pal.text_dim, self.latency_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "online".into())),
+            ConnState::Connected => (pal.success, self.latency_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "online".into())),
             ConnState::Connecting => (pal.warning, "connecting".into()),
             ConnState::Failed => (pal.danger, "failed".into()),
             ConnState::Lost => (pal.danger, "lost".into()),
         };
         let g = ui.painter().layout_no_wrap(text, egui::FontId::monospace(12.0), pal.text_dim);
-        let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 12.0, 32.0), egui::Sense::hover());
-        ui.painter().circle_filled(egui::pos2(r.left() + 3.0, r.center().y), 3.0, dot);
-        ui.painter().galley(egui::pos2(r.left() + 12.0, r.center().y - g.size().y / 2.0), g, pal.text_dim);
+        let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 32.0, 30.0), egui::Sense::hover());
+        ui.painter().rect_filled(r, egui::CornerRadius::same(255), pal.control());
+        ui.painter().circle_filled(egui::pos2(r.left() + 14.0, r.center().y), 3.5, dot);
+        ui.painter().galley(egui::pos2(r.left() + 22.0, r.center().y - g.size().y / 2.0), g, pal.text_dim);
         resp.on_hover_text(if self.cfg.ssh.enabled { format!("Through SSH {}", self.cfg.ssh.host) } else { self.cfg.subtitle() });
     }
 
@@ -1735,7 +1742,7 @@ impl Workspace {
         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), egui::Sense::click());
         let h = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), super::motion::FAST as f32);
         if h > 0.0 {
-            ui.painter().rect_filled(r, egui::CornerRadius::same(4), pal.surface.gamma_multiply(h));
+            ui.painter().rect_filled(r, egui::CornerRadius::same(8), pal.control().gamma_multiply(h));
         }
         let t = ui.ctx().animate_bool_with_time(id.with("chev"), open, super::motion::SETTLE as f32);
         super::home::paint_chevron(ui.painter(), egui::Rect::from_center_size(egui::pos2(r.left() + 10.0, r.center().y), vec2(12.0, 12.0)), t, pal.text_dim);
@@ -1878,9 +1885,9 @@ impl Workspace {
         let resp = ui.interact(r, ui.scope_id().with(("object-row", obj.kind.section(), &obj.schema, &obj.name, &obj.parent, &obj.arguments, pinned_section)), egui::Sense::click());
         let h = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), super::motion::FAST as f32);
         if selected {
-            ui.painter().rect_filled(r, egui::CornerRadius::same(4), pal.surface_hover);
+            ui.painter().rect_filled(r, egui::CornerRadius::same(8), pal.control_on());
         } else if h > 0.0 {
-            ui.painter().rect_filled(r, egui::CornerRadius::same(4), pal.surface.gamma_multiply(h));
+            ui.painter().rect_filled(r, egui::CornerRadius::same(8), pal.control().gamma_multiply(h));
         }
         let icon = match obj.kind {
             ObjectKind::View | ObjectKind::MaterializedView => Icon::View,
@@ -1914,8 +1921,16 @@ impl Workspace {
         } else if resp.clicked() {
             actions.push(WsAction::OpenObject { obj: obj.clone(), structure: false, new_tab: cmd });
         }
-        egui::Popup::menu(&options).show(|ui| self.object_menu(ui, obj, dialect, sh, actions));
-        egui::Popup::context_menu(&resp).show(|ui| {
+        egui::Popup::menu(&options).frame(table_menu_frame(ui)).style(table_menu_style)
+            .show(|ui| self.object_menu(ui, obj, dialect, sh, actions));
+        let scripted_id = resp.id.with("scripted-table-menu");
+        if obj.kind.has_rows() && ui.ctx().data_mut(|d| d.remove_temp::<bool>(egui::Id::unique("script-open-tablemenu"))).is_some() {
+            ui.ctx().data_mut(|d| d.insert_temp(scripted_id, true));
+            egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&resp));
+        }
+        let scripted = ui.ctx().data(|d| d.get_temp::<bool>(scripted_id)).unwrap_or(false);
+        let popup = if scripted { egui::Popup::menu(&resp) } else { egui::Popup::context_menu(&resp) };
+        popup.frame(table_menu_frame(ui)).style(table_menu_style).show(|ui| {
             if obj.kind.has_rows() {
                 let pinned = self.cfg.pinned.contains(&obj.name);
                 if ui.button(if pinned { "Unpin" } else { "Pin to top" }).clicked() {
@@ -2100,6 +2115,7 @@ impl Workspace {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 let strip_left = ui.min_rect().left();
+                let ink_slot = ui.painter().add(egui::Shape::Noop);
                 let mut ink: Option<egui::Rect> = None;
                 for (i, tab) in self.tabs.iter().enumerate() {
                     let selected = i == self.active;
@@ -2113,7 +2129,7 @@ impl Workspace {
                     let (r, resp) = ui.allocate_exact_size(vec2(172.0, 40.0), egui::Sense::click());
                     let h = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), super::motion::FAST as f32);
                     if h > 0.0 && !selected {
-                        ui.painter().rect_filled(r, egui::CornerRadius::ZERO, pal.surface.gamma_multiply(h));
+                        ui.painter().rect_filled(r.shrink2(vec2(2.0, 5.0)), egui::CornerRadius::same(255), pal.control().gamma_multiply(h));
                     }
                     if selected {
                         ink = Some(r);
@@ -2140,7 +2156,7 @@ impl Workspace {
                         ui.painter().circle_filled(cr.center(), 3.0, pal.text_dim);
                     } else if resp.hovered() {
                         if hover_close {
-                            ui.painter().rect_filled(cr, egui::CornerRadius::same(4), pal.surface_hover);
+                            ui.painter().rect_filled(cr, egui::CornerRadius::same(255), pal.control_hover());
                         }
                         paint_icon(ui.painter(), cr.shrink(5.0), Icon::Close, if hover_close { pal.text } else { pal.text_dim });
                     }
@@ -2170,12 +2186,12 @@ impl Workspace {
                         }
                     });
                 }
-                // The ink slides to the selected tab instead of jumping.
+                // The selected tab's pill slides to it instead of jumping. Painted behind the labels.
                 if let Some(t) = ink {
                     let id = egui::Id::unique(("tab-ink", self.cfg.id));
                     let x = super::motion::glide(ui.ctx(), id.with("x"), t.left() - strip_left, super::motion::SETTLE);
-                    let bar = egui::Rect::from_min_size(egui::pos2(strip_left + x, t.bottom() - 2.0), vec2(t.width(), 2.0));
-                    ui.painter().rect_filled(bar, egui::CornerRadius::ZERO, pal.text);
+                    let pill = egui::Rect::from_min_size(egui::pos2(strip_left + x, t.top()), t.size()).shrink2(vec2(2.0, 5.0));
+                    ui.painter().set(ink_slot, egui::Shape::rect_filled(pill, egui::CornerRadius::same(255), pal.control_on()));
                 }
                 ui.add_space(4.0);
                 ui.allocate_ui_with_layout(vec2(36.0, 40.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -2325,6 +2341,15 @@ fn take_script() -> std::collections::VecDeque<String> {
 }
 
 /// Subsequence match: "usr" matches "users".
+/// "PostgreSQL 16.4" from a driver label and a server banner such as
+/// "PostgreSQL 16.4 (Debian 16.4-1) on x86_64…" or "3.54.1".
+fn short_version(label: &str, banner: &str) -> String {
+    match banner.split_whitespace().find(|w| w.starts_with(|c: char| c.is_ascii_digit())) {
+        Some(v) => format!("{label} {}", v.trim_end_matches([',', ';'])),
+        None => label.to_string(),
+    }
+}
+
 pub fn fuzzy(hay: &str, needle: &str) -> bool {
     if hay.contains(needle) {
         return true;
@@ -2422,7 +2447,7 @@ fn admin_ui(a: &mut AdminTab, ui: &mut egui::Ui, cx: &mut TabCtx) {
         ui.label(RichText::new(e).color(pal.danger));
         return;
     }
-    let opts = grid::GridOptions { id: egui::Id::unique(("admin", a.id)), editable: false, null_text: "NULL", font_size: cx.settings.grid_font_size, row_height: None };
+    let opts = grid::GridOptions { id: egui::Id::unique(("admin", a.id)), editable: false, null_text: "NULL", font_size: cx.settings.grid_font_size, row_height: None, show_row_numbers: cx.settings.show_row_numbers, alternating_rows: cx.settings.alternating_rows };
     let src = ResultSource { meta: grid::result_meta(&a.data), rows: &a.rows, sort: &[] };
     for ev in grid::show(ui, &src, &mut a.grid, &opts) {
         if let grid::GridEvent::CopyCells = ev {
@@ -2626,7 +2651,7 @@ mod tests {
             let mut switch = None; let mut home = false; let mut settings_open = false; let mut command = None; let mut create = None;
             let mut shared = Shared { store: &store, settings: &settings, queries: &mut queries, boards: &mut boards, toasts: &mut toasts, edit_connection: &mut edit, workspace_choices: &[], switch_workspace: &mut switch, show_home: &mut home, open_settings: &mut settings_open, workspace_command: &mut command, create_connection: &mut create, app_request: &mut None };
             let mut actions = Vec::new(); let mut row_rect = egui::Rect::NOTHING;
-            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(600.0,400.0))), events, time: Some(time), ..Default::default() }, |ui| {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(600.0,900.0))), events, time: Some(time), ..Default::default() }, |ui| {
                 egui::CentralPanel::default().show(ui, |ui| {
                     let id = ui.scope_id().with(("object-row", object.kind.section(), &object.schema, &object.name, &object.parent, &object.arguments, false));
                     workspace.object_row(ui, &object, true, false, 0, Dialect::Sqlite, &mut shared, &mut actions);
@@ -2655,6 +2680,13 @@ mod tests {
         frame(vec![button(point, egui::PointerButton::Primary, false)], 0.32);
         let (_, labels) = frame(Vec::new(), 0.34);
         assert!(labels.iter().any(|label| label == "Open structure"), "options-button menu: {labels:?}");
+    }
+
+    #[test]
+    fn env_bar_version_keeps_the_number_and_drops_the_build_banner() {
+        assert_eq!(short_version("PostgreSQL", "PostgreSQL 16.4 (Debian 16.4-1.pgdg120+2) on x86_64-pc-linux-gnu"), "PostgreSQL 16.4");
+        assert_eq!(short_version("SQLite", "3.54.1"), "SQLite 3.54.1");
+        assert_eq!(short_version("Redis", "unknown"), "Redis");
     }
 
     #[test]

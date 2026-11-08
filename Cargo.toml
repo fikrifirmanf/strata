@@ -1,6 +1,6 @@
 [package]
 name = "strata"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 description = "Strata — a fast, native, cross-platform database workbench"
 license = "MIT"
@@ -14,8 +14,10 @@ path = "src/main.rs"
 
 [dependencies]
 # UI
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "persistence", "clipboard", "links"] }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wgpu", "wayland", "x11", "persistence", "clipboard", "links"] }
 egui = "0.37"
+# Frosted glass for menus, popups, tooltips and toasts (ui/glass.rs).
+embun = "=0.2.0"
 egui_extras = { version = "0.37", features = ["svg"] }
 egui_plot = "0.38"
 rfd = "0.17"
@@ -75,7 +77,7 @@ window-vibrancy = "0.8"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
-objc2-app-kit = { version = "0.3", features = ["NSView", "NSVisualEffectView", "NSResponder", "NSGraphics", "objc2-core-foundation"] }
+objc2-app-kit = { version = "0.3", features = ["NSView", "NSVisualEffectView", "NSResponder", "NSGraphics", "NSWorkspace", "objc2-core-foundation"] }
 muda = { version = "0.20", default-features = false }
 
 [profile.release]

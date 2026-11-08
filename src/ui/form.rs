@@ -22,14 +22,13 @@ pub fn group_with_note<R>(ui: &mut Ui, title: &str, note: &str, label_w: Option<
         ui.label(RichText::new(title).font(medium(12.0)).color(pal.text_dim));
         ui.add_space(8.0);
     }
-    let out = egui::Frame::new().fill(pal.window).corner_radius(CornerRadius::same(6)).show(ui, |ui| {
+    // A soft grey group, 12 px corners, no border: the rows inside stay flat.
+    let out = egui::Frame::new().fill(pal.control()).corner_radius(CornerRadius::same(12)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 0.0;
         let mut g = Group { ui, label_w, rows: 0 };
         add(&mut g)
     });
-    // Border on top of the rows so a hovered row never pokes past the corners.
-    ui.painter().rect_stroke(out.response.rect, CornerRadius::same(6), Stroke::new(1.0, line2()), egui::StrokeKind::Inside);
     if !note.is_empty() {
         ui.add_space(8.0);
         ui.add(egui::Label::new(RichText::new(note).size(12.0).color(pal.text_dim)).wrap());
@@ -363,7 +362,7 @@ impl Group<'_> {
             for k in keys.iter().rev() {
                 let g = ui.painter().layout_no_wrap(k.to_string(), egui::FontId::monospace(12.0), pal.text_dim);
                 let (r, _) = ui.allocate_exact_size(vec2((g.size().x + 8.0).max(20.0), 20.0), Sense::hover());
-                ui.painter().rect_stroke(r, CornerRadius::same(4), Stroke::new(1.0, line2()), egui::StrokeKind::Inside);
+                ui.painter().rect_filled(r, CornerRadius::same(5), pal.control());
                 ui.painter().galley(r.center() - g.size() / 2.0, g, pal.text_dim);
             }
         });
@@ -387,7 +386,7 @@ pub fn mini(ui: &mut Ui, text: &str) -> Response {
     let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 16.0, 28.0), Sense::click());
     let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), motion::FAST as f32);
     if t > 0.0 {
-        ui.painter().rect_filled(r, CornerRadius::same(4), pal.surface_hover.gamma_multiply(t));
+        ui.painter().rect_filled(r, CornerRadius::same(8), pal.control_hover().gamma_multiply(t));
     }
     ui.painter().galley(r.center() - g.size() / 2.0, g, mix(pal.text_dim, pal.text, t));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -398,7 +397,7 @@ pub fn mini_text(ui: &mut Ui, text: &str, tip: &str) -> Response {
     let (r, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
     let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), motion::FAST as f32);
     if t > 0.0 {
-        ui.painter().rect_filled(r, CornerRadius::same(4), pal.surface_hover.gamma_multiply(t));
+        ui.painter().rect_filled(r, CornerRadius::same(8), pal.control_hover().gamma_multiply(t));
     }
     ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::monospace(14.0), mix(pal.text_dim, pal.text, t));
     resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -409,21 +408,22 @@ pub fn mini_icon(ui: &mut Ui, icon: Icon, tip: &str) -> Response {
     let (r, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
     let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), motion::FAST as f32);
     if t > 0.0 {
-        ui.painter().rect_filled(r, CornerRadius::same(4), pal.surface_hover.gamma_multiply(t));
+        ui.painter().rect_filled(r, CornerRadius::same(8), pal.control_hover().gamma_multiply(t));
     }
     paint_icon(ui.painter(), Rect::from_center_size(r.center(), vec2(16.0, 16.0)), icon, mix(pal.text_dim, pal.text, t));
     resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// 32 × 20 switch: a neutral track that fills with the text colour when on; the knob slides.
+/// 32 × 20 switch in the macOS shape: a soft grey track that turns green when on, a white knob.
 pub fn paint_switch(ui: &Ui, r: Rect, id: egui::Id, on: bool) {
     let pal = p();
     let t = motion::ease_out(ui.ctx().animate_bool_with_time(id.with("switch"), on, motion::SETTLE as f32));
-    let track = mix(pal.surface_hover, pal.text, t);
-    ui.painter().rect_filled(r, CornerRadius::same(10), track);
-    ui.painter().rect_stroke(r, CornerRadius::same(10), Stroke::new(1.0, line2().lerp_to_gamma(pal.text, t)), egui::StrokeKind::Inside);
+    let off = pal.control_hover();
+    let track = if t <= 0.0 { off } else { off.lerp_to_gamma(pal.success, t) };
+    ui.painter().rect_filled(r, CornerRadius::same(255), track);
     let knob = pos2(r.left() + 10.0 + 12.0 * t, r.center().y);
-    ui.painter().circle_filled(knob, 7.0, mix(pal.text_dim, pal.window, t));
+    ui.painter().circle_filled(knob + vec2(0.0, 0.5), 8.0, Color32::from_black_alpha(40));
+    ui.painter().circle_filled(knob, 8.0, Color32::WHITE);
 }
 
 /// A switch on its own, for toolbars ("Auto refresh").
@@ -447,14 +447,13 @@ pub fn seg_control<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(
     let n = options.len().max(1) as f32;
     let w = if width > 0.0 { width } else { (widest + 20.0) * n + 4.0 };
     let (r, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
-    ui.painter().rect_filled(r, CornerRadius::same(6), pal.surface);
+    ui.painter().rect_filled(r, CornerRadius::same(255), pal.control());
     let seg_w = (r.width() - 4.0) / n;
     let idx = options.iter().position(|(v, _)| v == value).unwrap_or(0) as f32;
     let id = ui.scope_id().with(("seg", r.left() as i32, r.top() as i32));
     let x = motion::glide(ui.ctx(), id, idx, motion::SETTLE);
     let thumb = Rect::from_min_size(pos2(r.left() + 2.0 + x * seg_w, r.top() + 2.0), vec2(seg_w, 26.0));
-    ui.painter().rect_filled(thumb, CornerRadius::same(4), pal.surface_hover);
-    ui.painter().rect_stroke(thumb, CornerRadius::same(4), Stroke::new(1.0, line2()), egui::StrokeKind::Inside);
+    paint_thumb(ui.painter(), thumb);
     let mut changed = false;
     for (i, (v, label)) in options.iter().enumerate() {
         let cell = Rect::from_min_size(pos2(r.left() + 2.0 + i as f32 * seg_w, r.top() + 2.0), vec2(seg_w, 26.0));
@@ -507,13 +506,14 @@ pub fn underline_tabs<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: 
     changed
 }
 
-/// The dialog shell: s1, 10 px corners, line border, a soft shadow; rises 8 px and fades in.
+/// The dialog shell: a solid sheet with 16 px corners, a hairline and a soft shadow; rises 8 px
+/// and fades in. Dialogs stay solid, never glass.
 pub fn dialog_frame() -> egui::Frame {
     let pal = p();
     egui::Frame::new()
         .fill(pal.sidebar)
         .stroke(Stroke::new(1.0, line()))
-        .corner_radius(CornerRadius::same(10))
+        .corner_radius(CornerRadius::same(16))
         .shadow(egui::epaint::Shadow { offset: [0, 16], blur: 48, spread: 0, color: if pal.dark { Color32::from_black_alpha(140) } else { Color32::from_rgba_unmultiplied(60, 50, 30, 56) } })
 }
 
@@ -540,7 +540,17 @@ pub fn dialog<R>(ctx: &egui::Context, id: &str, size: egui::Vec2, add: impl FnOn
     (inner.inner, backdrop.inner)
 }
 
-/// The sidebar's segmented control: ground well with a hairline, plain s3 thumb.
+/// The chosen segment: a brighter pill. In the light theme it is white with a faint edge, like the
+/// macOS segmented thumb.
+fn paint_thumb(painter: &egui::Painter, thumb: Rect) {
+    let pal = p();
+    if !pal.dark {
+        painter.rect_filled(thumb.translate(vec2(0.0, 0.5)), CornerRadius::same(255), Color32::from_black_alpha(22));
+    }
+    painter.rect_filled(thumb, CornerRadius::same(255), pal.control_on());
+}
+
+/// The sidebar's segmented control: a soft pill track with a brighter sliding thumb.
 pub fn seg_well<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)], width: f32) -> bool {
     let pal = p();
     let n = options.len().max(1) as f32;
@@ -551,13 +561,12 @@ pub fn seg_well<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, 
         (widest + 20.0) * n + 4.0
     };
     let (r, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
-    ui.painter().rect_filled(r, CornerRadius::same(6), pal.window);
-    ui.painter().rect_stroke(r, CornerRadius::same(6), Stroke::new(1.0, line()), egui::StrokeKind::Inside);
+    ui.painter().rect_filled(r, CornerRadius::same(255), pal.control());
     let seg_w = (r.width() - 4.0) / n;
     let idx = options.iter().position(|(v, _)| v == value).unwrap_or(0) as f32;
     let id = ui.scope_id().with(("seg-well", r.left() as i32, r.top() as i32));
     let x = motion::glide(ui.ctx(), id, idx, motion::SETTLE);
-    ui.painter().rect_filled(Rect::from_min_size(pos2(r.left() + 2.0 + x * seg_w, r.top() + 3.0), vec2(seg_w, 26.0)), CornerRadius::same(4), pal.surface_hover);
+    paint_thumb(ui.painter(), Rect::from_min_size(pos2(r.left() + 2.0 + x * seg_w, r.top() + 3.0), vec2(seg_w, 26.0)));
     let mut changed = false;
     for (i, (v, label)) in options.iter().enumerate() {
         let cell = Rect::from_min_size(pos2(r.left() + 2.0 + i as f32 * seg_w, r.top() + 3.0), vec2(seg_w, 26.0));
@@ -580,12 +589,28 @@ pub fn field(ui: &mut Ui, text: &mut String, hint: &str, icon: Icon, width: f32)
     let id = ui.scope_id().with(("field", hint));
     let focused = ui.ctx().memory(|m| m.has_focus(id));
     let t = ui.ctx().animate_bool_with_time(id.with("focus"), focused, motion::FAST as f32);
-    ui.painter().rect_filled(r, CornerRadius::same(6), pal.window);
-    ui.painter().rect_stroke(r, CornerRadius::same(6), Stroke::new(1.0, line2().lerp_to_gamma(pal.grid_selection_border, t)), egui::StrokeKind::Inside);
+    ui.painter().rect_filled(r, CornerRadius::same(255), pal.control());
+    if t > 0.0 {
+        ui.painter().rect_stroke(r, CornerRadius::same(255), Stroke::new(1.0, pal.text_dim.gamma_multiply(t)), egui::StrokeKind::Inside);
+    }
     paint_icon(ui.painter(), Rect::from_center_size(pos2(r.left() + 18.0, r.center().y), vec2(16.0, 16.0)), icon, pal.text_faint);
     let inner = Rect::from_min_max(pos2(r.left() + 34.0, r.top()), pos2(r.right() - 8.0, r.bottom()));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)));
     child.add(line_edit(text).id(id).frame(egui::Frame::NONE).hint_text(RichText::new(hint).color(pal.text_faint)).desired_width(inner.width()))
+}
+
+/// A roomy search field with a soft focus fill, without a text-edit outline.
+pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str, id: egui::Id, width: f32) -> Response {
+    let pal = p();
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
+    let focused = ui.ctx().memory(|m| m.has_focus(id));
+    ui.painter().rect_filled(rect, CornerRadius::same(255), if focused { pal.control_hover() } else { pal.control() });
+    paint_icon(ui.painter(), Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), vec2(16.0, 16.0)), Icon::Search, pal.text_dim);
+    let inner = Rect::from_min_max(pos2(rect.left() + 36.0, rect.top()), pos2(rect.right() - 12.0, rect.bottom()));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    child.add(line_edit(text).id(id).frame(egui::Frame::NONE)
+        .hint_text(RichText::new(hint).color(pal.text_faint)).desired_width(inner.width()))
+        .on_hover_text(hint)
 }
 
 /// One 30px menu row: a fixed check column, then the label. Hover or `highlighted` (keyboard)
@@ -595,7 +620,7 @@ pub fn menu_row(ui: &mut Ui, label: &str, checked: bool, highlighted: bool) -> R
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
     let h = ui.ctx().animate_bool_with_time(resp.id.with("hover"), highlighted || resp.hovered(), motion::FAST as f32);
     if h > 0.0 {
-        ui.painter().rect_filled(r, CornerRadius::same(4), pal.surface_hover.gamma_multiply(h));
+        ui.painter().rect_filled(r, CornerRadius::same(8), pal.control_hover().gamma_multiply(h));
     }
     if checked {
         paint_icon(ui.painter(), Rect::from_center_size(pos2(r.left() + 14.0, r.center().y), vec2(14.0, 14.0)), Icon::Check, pal.text);
