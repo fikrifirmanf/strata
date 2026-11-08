@@ -22,7 +22,10 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $name = "strata-$Version-windows-x86_64"
 New-Item -ItemType Directory -Force "dist\$name" | Out-Null
-Copy-Item target\release\strata.exe, README.md, LICENSE "dist\$name\"
+Copy-Item target\release\strata.exe, README.md, LICENSE, THIRD_PARTY_NOTICES.md "dist\$name\"
+New-Item -ItemType Directory -Force "dist\$name\licenses" | Out-Null
+Copy-Item assets\fonts\OFL.txt "dist\$name\licenses\FONTS-OFL.txt"
+Copy-Item assets\db\README.md "dist\$name\licenses\DATABASE-LOGOS.md"
 Compress-Archive -Path "dist\$name\*" -DestinationPath "dist\$name.zip"
 Remove-Item -Recurse -Force "dist\$name"
 Get-ChildItem dist

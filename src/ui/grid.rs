@@ -125,6 +125,7 @@ pub fn profile_all(meta: &mut [ColMeta], rows: &[Vec<Option<String>>]) {
 pub trait GridSource {
     fn columns(&self) -> &[ColMeta];
     fn row_count(&self) -> usize;
+    fn row_number(&self, row: usize) -> usize { row + 1 }
     fn cell(&self, row: usize, col: usize) -> CellView<'_>;
     fn row_state(&self, _row: usize) -> RowState {
         RowState::Normal
@@ -187,6 +188,17 @@ impl GridState {
         self.editing = None;
     }
 
+    /// Starts editing a real cell while keeping the row selection visible.
+    pub fn begin_edit(&mut self, src: &dyn GridSource, row: usize, col: usize) -> bool {
+        if row >= src.row_count() || col >= src.columns().len() { return false; }
+        self.cursor = Some((row, col));
+        self.rows = [row].into();
+        self.anchor = Some(row);
+        self.focused = true;
+        self.editing = Some((row, col, cell_string(src, row, col), true));
+        true
+    }
+
     pub fn select_row(&mut self, row: usize) {
         self.cursor = Some((row, self.cursor.map(|c| c.1).unwrap_or(0)));
         self.rows = [row].into();
@@ -212,7 +224,7 @@ pub fn first_line(s: &str, max: usize) -> String {
 
 /// Cell borders: a light grey, a step brighter than the app's hairline so rows and columns read.
 fn grid_line() -> Color32 {
-    if p().dark { Color32::from_white_alpha(30) } else { Color32::from_black_alpha(26) }
+    p().grid_separator
 }
 
 /// Shown in an empty-string cell, in the NULL placeholder style.
@@ -225,6 +237,8 @@ pub struct GridOptions<'a> {
     pub font_size: f32,
     /// Row height from the density control; `None` follows the font size.
     pub row_height: Option<f32>,
+    pub show_row_numbers: bool,
+    pub alternating_rows: bool,
 }
 
 /// Keeps one trackpad gesture on one axis. A vertical swipe always drifts a little sideways, and
@@ -254,25 +268,17 @@ struct CellLayout {
 }
 
 impl CellLayout {
-    fn for_column(meta: &ColMeta, font: &FontId, mono: &FontId) -> CellLayout {
+    fn for_column(meta: &ColMeta, mono: &FontId) -> CellLayout {
         let t = meta.data_type.to_ascii_lowercase();
         let pal = p();
-        if is_numeric_type(&t) && !meta.foreign_key {
-            CellLayout { font: mono.clone(), color: pal.grid_number, right: true }
-        } else if meta.foreign_key {
-            CellLayout { font: mono.clone(), color: pal.grid_text, right: true }
-        } else if t.contains("json") || t.contains("date") || t.contains("time") || t.contains("uuid") {
-            CellLayout { font: mono.clone(), color: pal.text_dim, right: false }
-        } else {
-            CellLayout { font: font.clone(), color: pal.grid_text, right: false }
-        }
+        CellLayout { font: mono.clone(), color: if is_numeric_type(&t) { pal.grid_number } else { pal.grid_text }, right: is_numeric_type(&t) || meta.foreign_key }
     }
 
-    /// The text box inside a cell: 12 px in from each side, one line tall, centred vertically.
+    /// The text box inside a cell: 6 px in from each side, one line tall, centred vertically.
     /// A foreign-key cell keeps room for its arrow whether or not it is shown.
     fn text_rect(&self, ui: &Ui, cell: Rect, fk: bool) -> Rect {
         let line = ui.fonts_mut(|f| f.row_height(&self.font));
-        let inner = cell.with_max_x(cell.right() - if fk { 28.0 } else { 12.0 }).with_min_x(cell.left() + 12.0);
+        let inner = cell.with_max_x(cell.right() - if fk { 24.0 } else { 6.0 }).with_min_x(cell.left() + 6.0);
         Rect::from_center_size(inner.center(), vec2(inner.width().max(1.0), line))
     }
 
@@ -283,14 +289,16 @@ impl CellLayout {
 
 pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOptions) -> Vec<GridEvent> {
     let pal = p();
+    ui.painter().rect_filled(ui.available_rect_before_wrap(), CornerRadius::ZERO, pal.grid_even);
     let mut events = Vec::new();
     let cols = src.columns();
     let visible: Vec<usize> = (0..cols.len()).filter(|c| !st.hidden.contains(c)).collect();
     let n_rows = src.row_count();
-    let font = FontId::proportional(opt.font_size);
-    let mono = FontId::monospace(opt.font_size - 0.5);
-    let row_h = opt.row_height.unwrap_or((opt.font_size + 19.0).round());
-    let layouts: Vec<CellLayout> = cols.iter().map(|m| CellLayout::for_column(m, &font, &mono)).collect();
+    let mono = FontId::monospace(opt.font_size);
+    let row_h = opt.row_height.unwrap_or((opt.font_size + 9.5).round()).max(opt.font_size + 8.0);
+    let header_h = (opt.font_size + 12.0).round();
+    let selected_text = super::mark_color(pal.grid_selection);
+    let layouts: Vec<CellLayout> = cols.iter().map(|m| CellLayout::for_column(m, &mono)).collect();
     // Screen rect of the cursor cell this frame, and the body's clip, for the gliding ring.
     let mut cursor_rect: Option<Rect> = None;
     let mut body_clip: Option<Rect> = None;
@@ -301,11 +309,12 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
 
     // TableBuilder only scrolls vertically; wide result sets scroll sideways in this outer area.
     egui::ScrollArea::horizontal().id_salt(opt.id.with("hscroll")).auto_shrink([false, false]).show(ui, |ui| {
-        // Swiss grid: horizontal rules only. The resize handle still shows on hover and drag.
+        // Dense grid: shared cell edges, with resize handles on hover and drag.
         ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::NONE;
         // Cells butt against each other so header fill, rules and selection run unbroken; text carries its own inset.
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-        let max_scroll_height = (ui.available_height() - 40.0 - ui.spacing().scroll.bar_width - 8.0).max(0.0);
+        let max_scroll_height = (ui.available_height() - header_h - ui.spacing().scroll.bar_width - 2.0).max(0.0);
+        let cell_menu_frame = super::table_menu_frame(ui);
         let mut table = TableBuilder::new(ui)
             .id_salt(opt.id)
             .striped(false)
@@ -319,7 +328,11 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
         if let Some(r) = st.scroll_to.take() {
             table = table.scroll_to_row(r, None);
         }
-        for (i, &c) in visible.iter().enumerate() {
+        if opt.show_row_numbers {
+            let digits = src.row_number(n_rows.saturating_sub(1)).to_string().len();
+            table = table.column(Column::exact((digits as f32 * opt.font_size * 0.62 + 12.0).max(32.0)).resizable(false));
+        }
+        for &c in &visible {
             // Size from the header and a sample of values ("fit content").
             let sample = (0..n_rows.min(40))
                 .map(|r| match src.cell(r, c) {
@@ -330,20 +343,22 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
                 .max()
                 .unwrap_or(0);
             let header_chars = cols[c].name.chars().count() + 2;
-            let w = sample.max(header_chars) as f32 * opt.font_size * 0.6 + 24.0 + if cols[c].foreign_key { 16.0 } else { 0.0 };
-            // The last column takes the rest of the width, so the grid never stops short.
-            table = if i + 1 == visible.len() {
-                table.column(Column::remainder().at_least(w.clamp(70.0, 340.0)).clip(true))
-            } else {
-                table.column(Column::initial(w.clamp(70.0, 340.0)).at_least(40.0).clip(true).resizable(true))
-            };
+            let w = sample.max(header_chars) as f32 * opt.font_size * 0.62 + 12.0 + if cols[c].foreign_key { 16.0 } else { 0.0 };
+            table = table.column(Column::initial(w.clamp(40.0, 340.0)).at_least(40.0).clip(true).resizable(true));
         }
 
         let scroll = table
-            .header(40.0, |mut header| {
+            .header(header_h, |mut header| {
+                if opt.show_row_numbers {
+                    header.col(|ui| {
+                        let rect = ui.max_rect();
+                        ui.painter().rect_filled(rect, CornerRadius::ZERO, pal.grid_header);
+                        ui.painter().text(rect.center(), Align2::CENTER_CENTER, "#", super::medium(opt.font_size), pal.text_faint);
+                        ui.painter().vline(rect.right() - 0.5, rect.y_range(), Stroke::new(1.0, grid_line()));
+                    });
+                }
                 for (vi, &c) in visible.iter().enumerate() {
                     let meta = &cols[c];
-                    let lay = &layouts[c];
                     let (_, resp) = header.col(|ui| {
                         let r = ui.max_rect().expand2(vec2(4.0, 0.0));
                         ui.painter().rect_filled(r, CornerRadius::ZERO, pal.grid_header);
@@ -356,13 +371,12 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
                         if vi + 1 < visible.len() {
                             ui.painter().vline(cell.right() - 0.5, r.y_range(), Stroke::new(1.0, grid_line()));
                         }
-                        // Name only: no type, no strip. Keys keep their colour.
-                        let name_color = if meta.primary_key { super::pk_color() } else if meta.foreign_key { super::fk_color() } else { pal.grid_header_text };
+                        // Compact, centered headings keep all key and value columns aligned.
+                        let name_color = pal.grid_header_text;
                         let sorted = src.sort_of(c);
                         let inner = r.shrink2(vec2(12.0, 0.0)).with_max_x(r.right() - if sorted.is_some() { 26.0 } else { 12.0 });
                         let painter = ui.painter_at(inner);
-                        let (pos, align) = lay.anchor(inner);
-                        painter.text(pos, align, &meta.name, super::medium(opt.font_size), name_color);
+                        painter.text(inner.center(), Align2::CENTER_CENTER, &meta.name, super::semibold(opt.font_size), name_color);
                         if let Some(asc) = sorted {
                             let ar = Rect::from_center_size(pos2(r.right() - 14.0, r.center().y), vec2(8.0, 8.0));
                             let pts = if asc { vec![ar.left_bottom(), ar.right_bottom(), ar.center_top()] } else { vec![ar.left_top(), ar.right_top(), ar.center_bottom()] };
@@ -399,13 +413,24 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
                     let r = row.index();
                     let state = src.row_state(r);
                     let row_selected = st.rows.contains(&r);
-                    let base_bg = match state {
+                    let base_bg = if row_selected { pal.grid_selection } else { match state {
                         RowState::Inserted => pal.inserted,
                         RowState::Deleted => pal.deleted,
-                        RowState::Normal if row_selected => pal.grid_selection,
-                        // Plain rows take the surface they sit on (ground in a tab, surface 1 in a bento tile).
-                        RowState::Normal => egui::Color32::TRANSPARENT,
-                    };
+                        RowState::Normal if opt.alternating_rows && r % 2 == 1 => pal.grid_odd,
+                        RowState::Normal => pal.grid_even,
+                    }};
+                    if opt.show_row_numbers {
+                        let (_, resp) = row.col(|ui| {
+                            let rect = ui.max_rect().expand2(vec2(0.0, 1.0));
+                            ui.painter().rect_filled(rect, CornerRadius::ZERO, if row_selected { pal.grid_selection } else { pal.grid_header });
+                            ui.painter().text(pos2(rect.right() - 6.0, rect.center().y), Align2::RIGHT_CENTER, src.row_number(r).to_string(), mono.clone(), if row_selected { selected_text } else { pal.text_faint });
+                            ui.painter().vline(rect.right() - 0.5, rect.y_range(), Stroke::new(1.0, grid_line()));
+                        });
+                        if resp.clicked() {
+                            click(st, r, visible.first().copied().unwrap_or(0), resp.ctx.input(|i| i.modifiers));
+                            events.push(GridEvent::SelectionChanged);
+                        }
+                    }
                     for (vi, &c) in visible.iter().enumerate() {
                         let meta = &cols[c];
                         let lay = &layouts[c];
@@ -413,9 +438,9 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
                         let editing_here = matches!(&st.editing, Some((er, ec, _, _)) if *er == r && *ec == c);
                         let (_, resp) = row.col(|ui| {
                             let rect = ui.max_rect().expand2(vec2(4.0, 1.0));
-                            body_clip.get_or_insert(ui.clip_rect());
+                            body_clip = Some(body_clip.map_or(ui.clip_rect(), |clip| clip.union(ui.clip_rect())));
                             let modified = src.cell_modified(r, c) && state == RowState::Normal;
-                            ui.painter().rect_filled(rect, CornerRadius::ZERO, if modified { pal.modified } else { base_bg });
+                            ui.painter().rect_filled(rect, CornerRadius::ZERO, if modified && !row_selected { pal.modified } else { base_bg });
                             // Hairline borders: under each row, and between columns (not after the last).
                             // Drawn inside the cell's clip: on its edge they were half cut off.
                             let cell = ui.max_rect();
@@ -431,27 +456,35 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
                                 ui.painter().add(egui::Shape::convex_polygon(vec![t, t + vec2(6.0, 0.0), t + vec2(0.0, 6.0)], pal.accent, Stroke::NONE));
                             }
                             if is_cursor && st.focused {
-                                cursor_rect = Some(rect.shrink(1.0));
+                                cursor_rect = Some(cell.shrink(0.5));
                             }
-                            let text_rect = lay.text_rect(ui, rect, meta.foreign_key);
+                            let text_rect = lay.text_rect(ui, cell, meta.foreign_key);
                             if editing_here {
                                 if let Some((_, _, buf, first)) = &mut st.editing {
                                     let id = opt.id.with(("edit", r, c));
                                     let te = crate::ui::line_edit(buf)
                                         .id(id)
                                         .font(lay.font.clone())
-                                        .text_color(lay.color)
+                                        .text_color(if row_selected { selected_text } else { lay.color })
                                         .frame(egui::Frame::NONE)
                                         .margin(egui::Margin::ZERO)
                                         .align(if lay.right { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER })
                                         .desired_width(text_rect.width());
-                                    let out = ui.put(text_rect, te);
+                                    ui.visuals_mut().selection.bg_fill = pal.grid_selection_border.gamma_multiply(0.25);
+                                    ui.visuals_mut().selection.stroke = Stroke::new(1.0, selected_text);
+                                    // Compact cells are shorter than the app's normal 30px controls.
+                                    ui.spacing_mut().interact_size.y = cell.height();
+                                    let edit_rect = cell.shrink2(vec2(6.0, 0.0));
+                                    let out = ui.put(edit_rect, te);
                                     if *first {
                                         out.request_focus();
+                                        let mut edit_state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+                                        edit_state.cursor.set_char_range(Some(egui::text::CCursorRange::select_all_str(buf)));
+                                        egui::TextEdit::store_state(ui.ctx(), id, edit_state);
                                         *first = false;
                                     }
                                 }
-                                cursor_rect = Some(rect.shrink(1.0));
+                                cursor_rect = Some(cell.shrink(0.5));
                                 return;
                             }
                             let (text, color, f) = match src.cell(r, c) {
@@ -474,7 +507,7 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
                                 }
                                 // ↗: the row this value points at.
                                 let a = Rect::from_center_size(arrow.center(), vec2(9.0, 9.0));
-                                let st = Stroke::new(1.5, super::fk_color());
+                                let st = Stroke::new(1.5, if row_selected { selected_text } else { super::fk_color() });
                                 ui.painter().line_segment([a.left_bottom(), a.right_top()], st);
                                 ui.painter().add(egui::Shape::line(vec![a.left_top() + vec2(2.0, 0.0), a.right_top(), a.right_bottom() - vec2(0.0, 2.0)], st));
                                 if response.on_hover_text("Open referenced row").clicked() {
@@ -483,7 +516,8 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
                             }
                             let painter = ui.painter_at(text_rect.expand2(vec2(0.0, 4.0)));
                             let (pos, align) = lay.anchor(text_rect);
-                            let drawn = painter.text(pos, align, &text, f, color);
+                            let shown = super::home::ellipsize_to(&painter, &text, f.clone(), text_rect.width());
+                            let drawn = painter.text(pos, align, &shown, f, if row_selected { selected_text } else { color });
                             if state == RowState::Deleted {
                                 let w = drawn.width().min(text_rect.width());
                                 let x0 = if lay.right { text_rect.right() - w } else { text_rect.left() };
@@ -498,13 +532,22 @@ pub fn show(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
                             events.push(GridEvent::SelectionChanged);
                         }
                         if resp.double_clicked() && opt.editable && state != RowState::Deleted {
-                            st.editing = Some((r, c, cell_string(src, r, c), true));
+                            st.begin_edit(src, r, c);
                         }
                         if resp.secondary_clicked() && !st.rows.contains(&r) {
                             click(st, r, c, Modifiers::NONE);
                             events.push(GridEvent::SelectionChanged);
                         }
-                        resp.context_menu(|ui| context_menu(ui, src, st, opt, r, c, &mut events));
+                        // Keep the scripted menu anchored to the cell on subsequent frames too.
+                        let scripted_id = resp.id.with("scripted-menu");
+                        if r == 2 && c == 1 && resp.ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::unique("script-open-cellmenu"))).is_some() {
+                            resp.ctx.data_mut(|d| d.insert_temp(scripted_id, true));
+                            egui::Popup::open_id(&resp.ctx, egui::Popup::default_response_id(&resp));
+                        }
+                        let scripted = resp.ctx.data(|d| d.get_temp::<bool>(scripted_id)).unwrap_or(false);
+                        let popup = if scripted { egui::Popup::menu(&resp) } else { egui::Popup::context_menu(&resp) };
+                        popup.frame(cell_menu_frame).style(super::table_menu_style)
+                            .show(|ui| context_menu(ui, src, st, opt, r, c, &mut events));
                     }
                 });
             });
@@ -568,8 +611,12 @@ fn paint_cursor_ring(ui: &Ui, st: &mut GridState, target: Option<Rect>, clip: Op
         }
     }
     st.ring_last = Some(target);
-    let color = if st.editing.is_some() { p().accent } else { p().grid_selection_border };
-    ui.painter().with_clip_rect(clip).rect_stroke(rect, CornerRadius::same(2), Stroke::new(1.5, color), egui::StrokeKind::Inside);
+    let color = if st.editing.is_some() { p().danger } else { p().grid_selection_border };
+    ui.painter().with_clip_rect(clip).rect_stroke(rect, CornerRadius::ZERO, Stroke::new(if st.editing.is_some() { 2.0 } else { 1.0 }, color), egui::StrokeKind::Inside);
+    if st.editing.is_some() {
+        // The light inner edge stays distinct against the selected blue row in both themes.
+        ui.painter().with_clip_rect(clip).rect_stroke(rect.shrink(2.0), CornerRadius::ZERO, Stroke::new(1.0, p().grid_selection_border), egui::StrokeKind::Inside);
+    }
 }
 
 fn opts_null_len(opt: &GridOptions) -> usize {
@@ -656,7 +703,7 @@ fn keyboard(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
         return;
     }
     if opt.editable && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) && src.row_state(r) != RowState::Deleted {
-        st.editing = Some((r, c, cell_string(src, r, c), true));
+        st.begin_edit(src, r, c);
     }
     if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Space)) {
         events.push(GridEvent::QuickLook { row: r, col: c });
@@ -686,6 +733,11 @@ fn keyboard(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOpt
 
 fn context_menu(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &GridOptions, r: usize, c: usize, events: &mut Vec<GridEvent>) {
     ui.set_min_width(210.0);
+    // egui's menu default reduces button padding to (2, 0). Restore breathing room
+    // inside each hover target as well as the surrounding menu frame.
+    ui.spacing_mut().button_padding = vec2(12.0, 6.0);
+    ui.spacing_mut().item_spacing.y = 4.0;
+    ui.style_mut().visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
     fn item(ui: &mut Ui, events: &mut Vec<GridEvent>, label: &str, shortcut: &str, ev: GridEvent) {
         let resp = ui.add(egui::Button::new(label).shortcut_text(shortcut));
         if resp.clicked() {
@@ -695,6 +747,8 @@ fn context_menu(ui: &mut Ui, src: &dyn GridSource, st: &mut GridState, opt: &Gri
     }
     item(ui, events, "Copy", "⌘C", GridEvent::CopyCells);
     ui.menu_button("Copy rows as", |ui| {
+        ui.spacing_mut().button_padding = vec2(12.0, 6.0);
+        ui.spacing_mut().item_spacing.y = 4.0;
         for (f, l) in [(CopyFormat::Tsv, "Tab-separated"), (CopyFormat::Csv, "CSV"), (CopyFormat::Json, "JSON"), (CopyFormat::SqlInsert, "SQL INSERT"), (CopyFormat::Markdown, "Markdown table")] {
             if ui.button(l).clicked() {
                 events.push(GridEvent::CopyRows(f));
@@ -812,7 +866,7 @@ mod tests {
 
     fn foreign_key_frame(ctx: &egui::Context, state: &mut GridState, time: f64, events: Vec<egui::Event>) -> Vec<GridEvent> {
         let source = ForeignKeySource { columns: vec![ColMeta { name: "customer_id".into(), data_type: "integer".into(), foreign_key: true, ..Default::default() }] };
-        let options = GridOptions { id: egui::Id::unique("fk-regression"), editable: true, null_text: "NULL", font_size: 13.0, row_height: None };
+        let options = GridOptions { id: egui::Id::unique("fk-regression"), editable: true, null_text: "NULL", font_size: 13.0, row_height: None, show_row_numbers: true, alternating_rows: true };
         let mut result = Vec::new();
         let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 400.0))), time: Some(time), events, ..Default::default() }, |ui| {
             egui::CentralPanel::default().show(ui, |ui| { result = show(ui, &source, state, &options); });
@@ -843,6 +897,89 @@ mod tests {
         foreign_key_frame(&ctx, &mut state, 0.6, vec![egui::Event::PointerMoved(arrow.center()), pointer_button(arrow.center(), true)]);
         let events = foreign_key_frame(&ctx, &mut state, 0.62, vec![pointer_button(arrow.center(), false)]);
         assert!(events.contains(&GridEvent::FollowForeignKey { row: 0, col: 0 }), "the arrow must still open the related row");
+    }
+
+    fn sample_rows() -> Vec<Vec<Option<String>>> {
+        vec![vec![Some("acct-zero".into()), Some("row-zero".into())], vec![Some("acct-one".into()), Some("row-one".into())], vec![Some("acct-two".into()), Some("row-two".into())]]
+    }
+
+    fn render_grid(ctx: &egui::Context, state: &mut GridState, options: &GridOptions, events: Vec<egui::Event>) -> (Vec<egui::Shape>, Vec<GridEvent>, Vec<egui::epaint::ClippedShape>) {
+        let rows = sample_rows();
+        let src = ResultSource {
+            meta: ["account", "campaign"].into_iter().map(|name| ColMeta { name: name.into(), data_type: "text".into(), ..Default::default() }).collect(),
+            rows: &rows, sort: &[],
+        };
+        let mut result = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 400.0))), events, ..Default::default()
+        }, |ui| { ui.label("Table toolbar"); result = show(ui, &src, state, options); });
+        output.textures_delta.clear();
+        fn collect(shape: egui::Shape, flat: &mut Vec<egui::Shape>) {
+            match shape { egui::Shape::Vec(shapes) => for s in shapes { collect(s, flat); }, s => flat.push(s) }
+        }
+        let clipped = output.shapes.clone();
+        let mut flat = Vec::new();
+        for s in output.shapes { collect(s.shape, &mut flat); }
+        (flat, result, clipped)
+    }
+
+    #[test]
+    fn compact_grid_renders_stripes_gutter_and_blue_selection() {
+        let ctx = egui::Context::default();
+        let mut state = GridState::default();
+        let mut options = GridOptions { id: egui::Id::unique("dense-grid"), editable: true, null_text: "NULL", font_size: 12.5, row_height: None, show_row_numbers: true, alternating_rows: true };
+        render_grid(&ctx, &mut state, &options, vec![]);
+        let (shapes, _, _) = render_grid(&ctx, &mut state, &options, vec![]);
+        let text = |label: &str| shapes.iter().find_map(|s| match s { egui::Shape::Text(t) if t.galley.text() == label => Some(t), _ => None }).unwrap();
+        let toolbar = text("Table toolbar");
+        let ground = shapes.iter().find_map(|s| match s { egui::Shape::Rect(r) if r.fill == p().grid_even => Some(r.rect), _ => None }).unwrap();
+        assert!(ground.top() >= toolbar.pos.y + toolbar.galley.size().y, "grid ground must not cover the toolbar");
+        assert!((text("row-one").pos.y - text("row-zero").pos.y - 22.0).abs() < 0.1);
+        assert_eq!(text("row-zero").galley.job.sections[0].format.font_id.family, egui::FontFamily::Monospace);
+        for number in ["1", "2", "3"] { assert!(shapes.iter().any(|s| matches!(s, egui::Shape::Text(t) if t.galley.text() == number))); }
+        assert!(shapes.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.fill == p().grid_odd)));
+        state.select_row(1);
+        let (selected, _, _) = render_grid(&ctx, &mut state, &options, vec![]);
+        assert!(selected.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.fill == p().grid_selection)));
+        assert!(selected.iter().any(|s| matches!(s, egui::Shape::Text(t) if t.galley.text() == "row-one" && t.fallback_color == super::super::mark_color(p().grid_selection))));
+        options.show_row_numbers = false;
+        options.alternating_rows = false;
+        state.clear();
+        let (plain, _, _) = render_grid(&ctx, &mut state, &options, vec![]);
+        assert!(!plain.iter().any(|s| matches!(s, egui::Shape::Text(t) if t.galley.text() == "#" || t.galley.text() == "1")));
+        assert!(!plain.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.fill == p().grid_odd)));
+    }
+
+    #[test]
+    fn inline_editor_keeps_row_selected_and_commits_or_cancels_only_its_cell() {
+        let ctx = egui::Context::default();
+        p().apply(&ctx, 1.0);
+        let options = GridOptions { id: egui::Id::unique("inline-grid"), editable: true, null_text: "NULL", font_size: 12.5, row_height: None, show_row_numbers: true, alternating_rows: true };
+        let mut state = GridState::default();
+        let rows = sample_rows();
+        let src = ResultSource { meta: ["account", "campaign"].into_iter().map(|name| ColMeta { name: name.into(), data_type: "text".into(), ..Default::default() }).collect(), rows: &rows, sort: &[] };
+        assert!(!state.begin_edit(&src, 3, 0));
+        assert!(!state.begin_edit(&src, 0, 2));
+        assert!(state.begin_edit(&src, 0, 1));
+        render_grid(&ctx, &mut state, &options, vec![]);
+        let (shapes, _, clipped) = render_grid(&ctx, &mut state, &options, vec![egui::Event::Text("updated campaign".into())]);
+        assert_eq!(state.rows.iter().copied().collect::<Vec<_>>(), vec![0]);
+        assert!(shapes.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.stroke.color == p().danger && r.stroke.width == 2.0)));
+        let focus = clipped.iter().find_map(|s| match &s.shape {
+            egui::Shape::Rect(r) if r.stroke.color == p().danger && r.stroke.width == 2.0 => Some((r.rect, s.clip_rect)), _ => None
+        }).unwrap();
+        let editor_text = shapes.iter().find_map(|s| match s { egui::Shape::Text(t) if t.galley.text() == "updated campaign" => Some(t), _ => None }).unwrap();
+        assert!(editor_text.pos.y >= focus.0.top() && editor_text.pos.y + editor_text.galley.size().y <= focus.0.bottom(), "editing text must fit vertically inside a compact cell");
+        assert!(focus.1.contains(focus.0.center()), "an editor in the second column must not be clipped to the first column");
+        let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        let (_, events, _) = render_grid(&ctx, &mut state, &options, vec![key(Key::Enter)]);
+        assert_eq!(events, vec![GridEvent::Edit { row: 0, col: 1, value: EditValue::Text("updated campaign".into()) }]);
+        state.begin_edit(&src, 0, 1);
+        render_grid(&ctx, &mut state, &options, vec![]);
+        render_grid(&ctx, &mut state, &options, vec![egui::Event::Text("discard this".into())]);
+        let (_, events, _) = render_grid(&ctx, &mut state, &options, vec![key(Key::Escape)]);
+        assert_eq!(events, Vec::<GridEvent>::new());
+        assert!(state.editing.is_none());
     }
 
     #[test]

@@ -161,112 +161,112 @@ impl Palette {
         p
     }
 
-    /// Strata's default, "Basalt": flat warm-stone layers, translucent-grey hairlines, one ochre
-    /// accent. Lines are the opaque result of white at 8 % and 14 % over the panel tone, because
+    /// Strata's default, "Obsidian": flat warm near-black surfaces, translucent-grey hairlines,
+    /// soft grey controls, one ochre accent. Lines are the opaque result of white at 8 % and 14 % over the panel tone, because
     /// several painters `mix` palette colours, which ignores alpha.
     pub fn night() -> Palette {
         Palette {
             name: "Strata Night".into(),
             dark: true,
-            window: hex("#0F0E0D").unwrap(),
-            content: hex("#0F0E0D").unwrap(),
-            sidebar: hex("#161514").unwrap(),
-            rail: hex("#161514").unwrap(),
-            surface: hex("#1E1C1A").unwrap(),
-            surface_hover: hex("#292623").unwrap(),
-            border: hex("#373635").unwrap(),
-            separator: hex("#292827").unwrap(),
-            text: hex("#F0EDE7").unwrap(),
-            text_dim: hex("#B8B2A8").unwrap(),
-            text_faint: hex("#928C82").unwrap(),
+            window: hex("#141312").unwrap(),
+            content: hex("#141312").unwrap(),
+            sidebar: hex("#1D1C1B").unwrap(),
+            rail: hex("#1D1C1B").unwrap(),
+            surface: hex("#232120").unwrap(),
+            surface_hover: hex("#2C2A28").unwrap(),
+            border: hex("#3A3836").unwrap(),
+            separator: hex("#2A2928").unwrap(),
+            text: hex("#ECE9E4").unwrap(),
+            text_dim: hex("#A9A49C").unwrap(),
+            text_faint: hex("#9C968C").unwrap(),
             accent: hex("#F0AB43").unwrap(),
             on_accent: hex("#1F1405").unwrap(),
             success: hex("#86D596").unwrap(),
             warning: hex("#F0AB43").unwrap(),
             danger: hex("#F47C66").unwrap(),
-            tab_selected: hex("#292623").unwrap(),
-            grid_header: hex("#161514").unwrap(),
-            grid_header_text: hex("#F0EDE7").unwrap(),
-            grid_even: hex("#0F0E0D").unwrap(),
-            grid_odd: hex("#0F0E0D").unwrap(),
-            grid_text: hex("#F0EDE7").unwrap(),
-            grid_number: hex("#F0EDE7").unwrap(),
-            grid_placeholder: hex("#928C82").unwrap(),
-            grid_separator: hex("#292827").unwrap(),
-            grid_selection: hex("#272625").unwrap(),
-            grid_selection_border: hex("#C8C4BC").unwrap(),
+            tab_selected: hex("#2C2A28").unwrap(),
+            grid_header: hex("#252525").unwrap(),
+            grid_header_text: hex("#DEDEDE").unwrap(),
+            grid_even: hex("#1E1E1E").unwrap(),
+            grid_odd: hex("#2B2B2B").unwrap(),
+            grid_text: hex("#DEDEDE").unwrap(),
+            grid_number: hex("#DEDEDE").unwrap(),
+            grid_placeholder: hex("#9C968C").unwrap(),
+            grid_separator: hex("#383838").unwrap(),
+            grid_selection: hex("#0058D0").unwrap(),
+            grid_selection_border: hex("#FFFFFF").unwrap(),
             modified: hex("#3A2C14").unwrap(),
             inserted: hex("#201F1E").unwrap(),
             deleted: hex("#3D1D18").unwrap(),
-            editor_bg: hex("#0F0E0D").unwrap(),
-            editor_text: hex("#B8B2A8").unwrap(),
-            editor_keyword: hex("#F0EDE7").unwrap(),
-            editor_function: hex("#F0EDE7").unwrap(),
+            editor_bg: hex("#141312").unwrap(),
+            editor_text: hex("#A9A49C").unwrap(),
+            editor_keyword: hex("#ECE9E4").unwrap(),
+            editor_function: hex("#ECE9E4").unwrap(),
             editor_string: hex("#B8B2A8").unwrap(),
             editor_dquote: hex("#B8B2A8").unwrap(),
             editor_backtick: hex("#B8B2A8").unwrap(),
             editor_number: hex("#B8B2A8").unwrap(),
-            editor_comment: hex("#928C82").unwrap(),
-            editor_current_query: hex("#161514").unwrap(),
+            editor_comment: hex("#9C968C").unwrap(),
+            editor_current_query: hex("#1B1A19").unwrap(),
             editor_selection: hex("#3A2C14").unwrap(),
             chart: [hex("#3987E5").unwrap(), hex("#D95926").unwrap(), hex("#199E70").unwrap(), hex("#C98500").unwrap(), hex("#D55181").unwrap()],
-            ground: Color32::from_rgba_unmultiplied(15, 14, 13, 236),
-            glass: hex("#161514").unwrap(),
-            glass_stroke: hex("#292827").unwrap(),
+            ground: Color32::from_rgba_unmultiplied(20, 19, 18, 236),
+            glass: hex("#1D1C1B").unwrap(),
+            glass_stroke: hex("#2A2928").unwrap(),
             accent2: hex("#54D1B8").unwrap(),
         }
     }
 
-    /// "Limestone", the light counterpart of Basalt.
+    /// "Quartz", the light counterpart of Obsidian.
     pub fn day() -> Palette {
         Palette {
             name: "Strata Day".into(),
             dark: false,
-            window: hex("#F1EEE7").unwrap(),
-            content: hex("#F1EEE7").unwrap(),
-            sidebar: hex("#FAF8F4").unwrap(),
-            rail: hex("#FAF8F4").unwrap(),
+            window: hex("#FCFBF9").unwrap(),
+            content: hex("#FCFBF9").unwrap(),
+            sidebar: hex("#F3F1ED").unwrap(),
+            rail: hex("#F3F1ED").unwrap(),
             surface: hex("#FFFFFF").unwrap(),
-            surface_hover: hex("#EAE6DD").unwrap(),
-            border: hex("#D7D5D2").unwrap(),
-            separator: hex("#E6E4E0").unwrap(),
+            surface_hover: hex("#ECE9E3").unwrap(),
+            border: hex("#D9D6D0").unwrap(),
+            separator: hex("#E7E5E1").unwrap(),
             text: hex("#1B1916").unwrap(),
-            text_dim: hex("#555048").unwrap(),
-            text_faint: hex("#6B665C").unwrap(),
+            text_dim: hex("#57524A").unwrap(),
+            text_faint: hex("#625D54").unwrap(),
             accent: hex("#945600").unwrap(),
             on_accent: Color32::WHITE,
             success: hex("#1F7235").unwrap(),
             warning: hex("#945600").unwrap(),
             danger: hex("#B23520").unwrap(),
-            tab_selected: hex("#EAE6DD").unwrap(),
-            grid_header: hex("#FAF8F4").unwrap(),
+            tab_selected: hex("#ECE9E3").unwrap(),
+            grid_header: hex("#EEEEEE").unwrap(),
             grid_header_text: hex("#1B1916").unwrap(),
-            grid_even: hex("#F1EEE7").unwrap(),
-            grid_odd: hex("#F1EEE7").unwrap(),
+            grid_even: hex("#FFFFFF").unwrap(),
+            grid_odd: hex("#F2F2F2").unwrap(),
             grid_text: hex("#1B1916").unwrap(),
             grid_number: hex("#1B1916").unwrap(),
-            grid_placeholder: hex("#6B665C").unwrap(),
-            grid_separator: hex("#E6E4E0").unwrap(),
-            grid_selection: hex("#E1DFDB").unwrap(),
-            grid_selection_border: hex("#45413A").unwrap(),
+            grid_placeholder: hex("#625D54").unwrap(),
+            grid_separator: hex("#E3E2E0").unwrap(),
+            grid_selection: hex("#0058D0").unwrap(),
+            grid_selection_border: hex("#FFFFFF").unwrap(),
             modified: hex("#F8E9CC").unwrap(),
             inserted: hex("#EDEBE8").unwrap(),
             deleted: hex("#F9E0DA").unwrap(),
-            editor_bg: hex("#F1EEE7").unwrap(),
-            editor_text: hex("#555048").unwrap(),
+            editor_bg: hex("#FCFBF9").unwrap(),
+            editor_text: hex("#57524A").unwrap(),
             editor_keyword: hex("#1B1916").unwrap(),
             editor_function: hex("#1B1916").unwrap(),
             editor_string: hex("#555048").unwrap(),
             editor_dquote: hex("#555048").unwrap(),
             editor_backtick: hex("#555048").unwrap(),
             editor_number: hex("#555048").unwrap(),
-            editor_comment: hex("#6B665C").unwrap(),
-            editor_current_query: hex("#FAF8F4").unwrap(),
+            editor_comment: hex("#625D54").unwrap(),
+            editor_current_query: hex("#F3F1ED").unwrap(),
             editor_selection: hex("#F8E9CC").unwrap(),
             chart: [hex("#2A78D6").unwrap(), hex("#EB6834").unwrap(), hex("#1BAF7A").unwrap(), hex("#EDA100").unwrap(), hex("#E87BA4").unwrap()],
-            ground: Color32::from_rgba_unmultiplied(241, 238, 231, 230),
-            glass: hex("#FAF8F4").unwrap(),
-            glass_stroke: hex("#E6E4E0").unwrap(),
+            ground: Color32::from_rgba_unmultiplied(252, 251, 249, 230),
+            glass: hex("#F3F1ED").unwrap(),
+            glass_stroke: hex("#E7E5E1").unwrap(),
             accent2: hex("#0A6E5C").unwrap(),
         }
     }
@@ -372,10 +372,32 @@ impl Palette {
         Ok(Palette::from_keys(&name, &base, &colors))
     }
 
-    /// Floating sheets use an opaque fill so underlying rows never bleed through menus or dialogs.
+    /// Fill of floating sheets: menus, popups, tooltips, toasts. `ui::glass` turns exactly this
+    /// colour into Embun glass, so nothing else may use it. Opaque, so a sheet stays readable
+    /// wherever the glass is off.
     pub fn sheet(&self) -> Color32 {
-        let [r, g, b, _] = mix(self.glass_opaque(), self.surface, 0.35).to_array();
-        Color32::from_rgb(r, g, b)
+        if self.dark {
+            let [r, g, b, _] = mix(self.glass_opaque(), self.surface_hover, 0.6).to_array();
+            Color32::from_rgb(r, g, b)
+        } else {
+            // A hair off white, so the glass hook can tell a sheet from a white control.
+            Color32::from_rgb(254, 254, 253)
+        }
+    }
+
+    /// Soft control fill at rest: buttons, groups, fields, chips. White 7.5 % / black 5 %.
+    pub fn control(&self) -> Color32 {
+        if self.dark { Color32::from_white_alpha(19) } else { Color32::from_black_alpha(13) }
+    }
+
+    /// Soft control fill under the pointer: white 12 % / black 8.5 %.
+    pub fn control_hover(&self) -> Color32 {
+        if self.dark { Color32::from_white_alpha(31) } else { Color32::from_black_alpha(22) }
+    }
+
+    /// The chosen item inside a group or segmented control: white 14 % / solid white.
+    pub fn control_on(&self) -> Color32 {
+        if self.dark { Color32::from_white_alpha(36) } else { Color32::WHITE }
     }
 
     /// The glass tone without its transparency.
@@ -387,7 +409,7 @@ impl Palette {
 
     pub fn apply(&self, ctx: &egui::Context, scale: f32) {
         let mut v = if self.dark { Visuals::dark() } else { Visuals::light() };
-        let r = CornerRadius::same(6);
+        let r = CornerRadius::same(8);
         v.override_text_color = Some(self.text);
         // Panels paint their own glass or solid cards; the default fill would cover the ground.
         v.panel_fill = Color32::TRANSPARENT;
@@ -396,8 +418,8 @@ impl Palette {
         v.faint_bg_color = self.grid_odd;
         v.code_bg_color = self.surface_hover;
         v.window_stroke = Stroke::new(1.0, self.glass_stroke);
-        v.window_corner_radius = CornerRadius::same(10);
-        v.menu_corner_radius = CornerRadius::same(6);
+        v.window_corner_radius = CornerRadius::same(12);
+        v.menu_corner_radius = CornerRadius::same(12);
         v.hyperlink_color = self.accent2;
         // Neutral selection: chosen controls read by weight and fill, not by a second hue.
         v.selection.bg_fill = mix(self.content, self.text, if self.dark { 0.16 } else { 0.12 });
@@ -411,26 +433,25 @@ impl Palette {
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.separator);
         v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, self.text);
         v.widgets.noninteractive.corner_radius = r;
-        v.widgets.inactive.bg_fill = self.surface;
-        v.widgets.inactive.weak_bg_fill = self.surface;
-        v.widgets.inactive.bg_stroke = Stroke::new(1.0, self.border);
+        // Soft controls: a fill and nothing else. No borders, no accent on press.
+        v.widgets.inactive.bg_fill = self.control();
+        v.widgets.inactive.weak_bg_fill = self.control();
+        v.widgets.inactive.bg_stroke = Stroke::NONE;
         v.widgets.inactive.fg_stroke = Stroke::new(1.0, self.text);
         v.widgets.inactive.corner_radius = r;
-        v.widgets.hovered.bg_fill = self.surface_hover;
-        v.widgets.hovered.weak_bg_fill = self.surface_hover;
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0, mix(self.border, self.text, 0.25));
+        v.widgets.hovered.bg_fill = self.control_hover();
+        v.widgets.hovered.weak_bg_fill = self.control_hover();
+        v.widgets.hovered.bg_stroke = Stroke::NONE;
         v.widgets.hovered.fg_stroke = Stroke::new(1.0, self.text);
         v.widgets.hovered.corner_radius = r;
         v.widgets.hovered.expansion = 0.0;
-        v.widgets.active.bg_fill = mix(self.surface_hover, self.accent, 0.22);
-        v.widgets.active.weak_bg_fill = mix(self.surface_hover, self.accent, 0.22);
-        v.widgets.active.bg_stroke = Stroke::new(1.0, self.accent);
+        v.widgets.active.bg_fill = self.control();
+        v.widgets.active.weak_bg_fill = self.control();
+        v.widgets.active.bg_stroke = Stroke::NONE;
         v.widgets.active.fg_stroke = Stroke::new(1.0, self.text);
         v.widgets.active.corner_radius = r;
         v.widgets.active.expansion = 0.0;
-        v.widgets.open = v.widgets.active;
-        v.widgets.open.bg_fill = self.surface_hover;
-        v.widgets.open.weak_bg_fill = self.surface_hover;
+        v.widgets.open = v.widgets.hovered;
         v.popup_shadow = egui::Shadow { offset: [0, 12], blur: 32, spread: 0, color: Color32::from_black_alpha(if self.dark { 140 } else { 46 }) };
         v.window_shadow = egui::Shadow { offset: [0, 16], blur: 48, spread: 0, color: Color32::from_black_alpha(if self.dark { 150 } else { 56 }) };
         ctx.set_theme(if self.dark { egui::Theme::Dark } else { egui::Theme::Light });

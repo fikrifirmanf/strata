@@ -50,6 +50,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "..\target\release\strata.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\assets\fonts\OFL.txt"; DestDir: "{app}\licenses"; DestName: "FONTS-OFL.txt"; Flags: ignoreversion
+Source: "..\assets\db\README.md"; DestDir: "{app}\licenses"; DestName: "DATABASE-LOGOS.md"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Strata"; Filename: "{app}\strata.exe"; AppUserModelID: "dev.strata.app"

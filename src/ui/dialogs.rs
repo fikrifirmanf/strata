@@ -749,8 +749,12 @@ fn open_anything(ctx: &egui::Context, query: &mut String, selected: &mut usize, 
         Action(Icon, WsAction),
     }
     modal_window(ctx, "Open anything", 560.0, |ui| {
-        let r = ui.add(crate::ui::line_edit(query).hint_text("Tables, views, functions, saved queries…").desired_width(f32::INFINITY));
+        let r = super::form::search_field(ui, query, "Tables, views, functions, saved queries…",
+            egui::Id::unique("open-anything-search"), ui.available_width());
         r.request_focus();
+        let navigate = ui.input(|i| i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::ArrowUp));
+        let reveal_selection = r.changed() || r.gained_focus() || navigate;
+        if r.changed() { *selected = 0; }
         let q = query.to_lowercase();
         let mut items: Vec<(String, Item)> = Vec::new();
         for o in info.objects {
@@ -790,7 +794,7 @@ fn open_anything(ctx: &egui::Context, query: &mut String, selected: &mut usize, 
                 if i == *selected || resp.hovered() {
                     ui.painter().rect_filled(rect, egui::CornerRadius::same(6), if i == *selected { mix(pal.surface, pal.accent, 0.2) } else { pal.surface_hover });
                 }
-                if i == *selected {
+                if i == *selected && reveal_selection {
                     resp.scroll_to_me(None);
                 }
                 paint_icon(ui.painter(), egui::Rect::from_center_size(egui::pos2(rect.left() + 16.0, rect.center().y), vec2(15.0, 15.0)), icon, pal.text_dim);
@@ -1116,7 +1120,7 @@ fn import_ui(ctx: &egui::Context, st: &mut ImportState, info: &ModalInfo, outcom
                 grid::profile_all(&mut meta, &preview_rows);
                 let src = grid::ResultSource { meta, rows: &preview_rows, sort: &[] };
                 let mut gs = grid::GridState::default();
-                let opts = grid::GridOptions { id: egui::Id::unique("import-preview"), editable: false, null_text: "NULL", font_size: 12.0, row_height: None };
+                let opts = grid::GridOptions { id: egui::Id::unique("import-preview"), editable: false, null_text: "NULL", font_size: 12.0, row_height: None, show_row_numbers: true, alternating_rows: true };
                 grid::show(ui, &src, &mut gs, &opts);
             });
         }
@@ -1417,6 +1421,64 @@ fn backup_ui(ctx: &egui::Context, st: &mut BackupState, info: &ModalInfo, outcom
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn open_anything_keeps_wheel_scroll_and_reveals_keyboard_selection() {
+        let ctx = egui::Context::default();
+        let mut cfg = ConnectionConfig::new(DriverKind::Sqlite);
+        cfg.path = ":memory:".into();
+        let session = Arc::new(Session::open(cfg.clone()).await.unwrap());
+        let objects: Vec<_> = (0..60).map(|i| DbObject {
+            schema: "main".into(), name: format!("table_{i:02}"), kind: ObjectKind::Table,
+            parent: None, arguments: None,
+        }).collect();
+        let info = ModalInfo { session: &session, cfg: &cfg, current_db: "main", objects: &objects, databases: &[], queries: &[] };
+        let mut query = String::new();
+        let mut selected = 0;
+        let mut time = 0.0;
+        let mut frame = |events, selected: &mut usize| {
+            time += 1.0 / 60.0;
+            let mut output = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1000.0, 800.0))),
+                time: Some(time), events, ..Default::default()
+            }, |_| {
+                open_anything(&ctx, &mut query, selected, &info, &mut ModalOutcome::Keep);
+            });
+            fn collect(shape: &egui::Shape, clip: egui::Rect, texts: &mut Vec<(String, egui::Pos2, egui::Rect)>) {
+                match shape {
+                    egui::Shape::Text(t) => texts.push((t.galley.text().to_owned(), t.pos, clip)),
+                    egui::Shape::Vec(shapes) => for s in shapes { collect(s, clip, texts); },
+                    _ => {}
+                }
+            }
+            let mut texts = Vec::new();
+            for entry in &output.shapes { collect(&entry.shape, entry.clip_rect, &mut texts); }
+            output.textures_delta.clear();
+            texts
+        };
+        let mut texts = Vec::new();
+        for _ in 0..20 { texts = frame(Vec::new(), &mut selected); }
+        let first = texts.iter().find(|(t, _, _)| t == "table_00").unwrap();
+        let initial_y = first.1.y;
+        let pointer = first.2.center();
+        frame(vec![egui::Event::PointerMoved(pointer), egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -240.0), modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Unknown,
+        }], &mut selected);
+        for _ in 0..30 { texts = frame(Vec::new(), &mut selected); }
+        let scrolled_y = texts.iter().find(|(t, _, _)| t == "table_00").unwrap().1.y;
+        assert!(scrolled_y < initial_y - 100.0, "wheel scroll should stay down: initial={initial_y}, after={scrolled_y}");
+        for _ in 0..30 { texts = frame(Vec::new(), &mut selected); }
+        let idle_y = texts.iter().find(|(t, _, _)| t == "table_00").unwrap().1.y;
+        assert!((idle_y - scrolled_y).abs() < 1.0, "idle frames must not pull the results back to the top");
+        selected = 49;
+        frame(vec![egui::Event::Key { key: egui::Key::ArrowDown, physical_key: None,
+            pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }], &mut selected);
+        for _ in 0..30 { texts = frame(Vec::new(), &mut selected); }
+        assert_eq!(selected, 50);
+        let row = texts.iter().find(|(t, _, _)| t == "table_50").unwrap();
+        assert!(row.2.contains(row.1), "keyboard selection must be visible");
+    }
 
     #[test]
     fn user_sql_quotes_names_and_passwords() {

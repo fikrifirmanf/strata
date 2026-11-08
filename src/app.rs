@@ -68,6 +68,7 @@ impl StrataApp {
         if translucent {
             apply_window_blur(cc);
         }
+        crate::ui::glass::install(cc);
         #[cfg(target_os = "macos")]
         let native_menu = crate::macos_menu::NativeMenu::install().ok();
         let mut updates = crate::ui::about::Updates::default();
@@ -483,6 +484,27 @@ impl StrataApp {
     }
 }
 
+/// The system's Reduce Transparency setting; menus then keep their opaque fill instead of glass.
+fn reduce_transparency() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        static CACHED: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
+        static CHECKED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+        let flag = CACHED.get_or_init(|| std::sync::atomic::AtomicBool::new(false));
+        // Re-read every few seconds so toggling the setting applies without a restart.
+        if let Ok(mut last) = CHECKED.lock() {
+            if last.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3)) {
+                let on = objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency();
+                flag.store(on, std::sync::atomic::Ordering::Relaxed);
+                *last = Some(std::time::Instant::now());
+            }
+        }
+        flag.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
 /// Turns on the platform's behind-window blur: vibrancy on macOS, acrylic on Windows.
 fn apply_window_blur(cc: &eframe::CreationContext<'_>) {
     #[cfg(target_os = "macos")]
@@ -535,6 +557,7 @@ impl eframe::App for StrataApp {
         self.apply_theme(&ctx);
         set_ground_opacity(if self.translucent { 1.0 - self.settings.window_translucency.clamp(0.0, 0.9) } else { 1.0 });
         paint_ground(&ctx);
+        crate::ui::glass::configure(&ctx, reduce_transparency());
         // Reopening reads the keychain, which can block on a macOS prompt. Wait until the window
         // has been drawn so it is on screen behind the prompt, then bring it forward again:
         // the prompt takes focus and the window would otherwise stay behind other apps.
